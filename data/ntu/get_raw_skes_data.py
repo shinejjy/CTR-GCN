@@ -30,14 +30,14 @@ def get_raw_bodies_data(skes_path, ske_name, frames_drop_skes, frames_drop_logge
     with open(ske_file, 'r') as fr:
         str_data = fr.readlines()
 
-    num_frames = int(str_data[0].strip('\r\n'))
+    num_frames = int(str_data[0].strip('\r\n')) # 第一行表示帧数
     frames_drop = []
     bodies_data = dict()
     valid_frames = -1  # 0-based index
     current_line = 1
 
     for f in range(num_frames):
-        num_bodies = int(str_data[current_line].strip('\r\n'))
+        num_bodies = int(str_data[current_line].strip('\r\n')) # body个数
         current_line += 1
 
         if num_bodies == 0:  # no data in this frame, drop it
@@ -49,7 +49,7 @@ def get_raw_bodies_data(skes_path, ske_name, frames_drop_skes, frames_drop_logge
         colors = np.zeros((num_bodies, 25, 2), dtype=np.float32)
 
         for b in range(num_bodies):
-            bodyID = str_data[current_line].strip('\r\n').split()[0]
+            bodyID = str_data[current_line].strip('\r\n').split()[0] # body编号
             current_line += 1
             num_joints = int(str_data[current_line].strip('\r\n'))  # 25 joints
             current_line += 1
