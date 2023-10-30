@@ -170,10 +170,15 @@ class CTRGC(nn.Module):
                 bn_init(m, 1)
 
     def forward(self, x, A=None, alpha=1):
+        # (4, 3, 64, 25)
         x1, x2, x3 = self.conv1(x).mean(-2), self.conv2(x).mean(-2), self.conv3(x)
+        # (4, 8, 25) (4, 8, 25) (4, 64, 64, 25)
         x1 = self.tanh(x1.unsqueeze(-1) - x2.unsqueeze(-2))
+        # (4, 64, 25, 25)
         x1 = self.conv4(x1) * alpha + (A.unsqueeze(0).unsqueeze(0) if A is not None else 0)  # N,C,V,V
+        # (4, 64, 25, 25) (1, 1, 25, 25)
         x1 = torch.einsum('ncuv,nctv->nctu', x1, x3)
+        # (4, 64, 64, 25)
         return x1
 
 class unit_tcn(nn.Module):
@@ -196,6 +201,7 @@ class unit_tcn(nn.Module):
 class unit_gcn(nn.Module):
     def __init__(self, in_channels, out_channels, A, coff_embedding=4, adaptive=True, residual=True):
         super(unit_gcn, self).__init__()
+        # (4, 3, 64, 25)
         inter_channels = out_channels // coff_embedding
         self.inter_c = inter_channels
         self.out_c = out_channels
@@ -233,6 +239,7 @@ class unit_gcn(nn.Module):
         bn_init(self.bn, 1e-6)
 
     def forward(self, x):
+        # (4, 3, 64, 25)
         y = None
         if self.adaptive:
             A = self.PA
@@ -252,6 +259,7 @@ class unit_gcn(nn.Module):
 class TCN_GCN_unit(nn.Module):
     def __init__(self, in_channels, out_channels, A, stride=1, residual=True, adaptive=True, kernel_size=5, dilations=[1,2]):
         super(TCN_GCN_unit, self).__init__()
+        # (4, 3, 64, 25) , out=64
         self.gcn1 = unit_gcn(in_channels, out_channels, A, adaptive=adaptive)
         self.tcn1 = MultiScale_TemporalConv(out_channels, out_channels, kernel_size=kernel_size, stride=stride, dilations=dilations,
                                             residual=False)
@@ -266,6 +274,7 @@ class TCN_GCN_unit(nn.Module):
             self.residual = unit_tcn(in_channels, out_channels, kernel_size=1, stride=stride)
 
     def forward(self, x):
+        # (4, 3, 64, 25)
         y = self.relu(self.tcn1(self.gcn1(x)) + self.residual(x))
         return y
 
@@ -288,6 +297,7 @@ class Model(nn.Module):
         self.data_bn = nn.BatchNorm1d(num_person * in_channels * num_point)
 
         base_channel = 64
+        # (4, 3, 64, 25)
         self.l1 = TCN_GCN_unit(in_channels, base_channel, A, residual=False, adaptive=adaptive)
         self.l2 = TCN_GCN_unit(base_channel, base_channel, A, adaptive=adaptive)
         self.l3 = TCN_GCN_unit(base_channel, base_channel, A, adaptive=adaptive)
@@ -308,14 +318,25 @@ class Model(nn.Module):
             self.drop_out = lambda x: x
 
     def forward(self, x):
+        """
+            N 视频个数(batch_size)
+            C = 3 (X,Y,S)代表一个点的信息(位置+预测的可能性)
+            T = 64 一个视频的帧数paper规定是64帧，不足的重头循环，多的clip
+            V 25 数据集中25个结点
+            M = 2 人数，paper中将人数限定在最大2个人
+        """
         if len(x.shape) == 3:
             N, T, VC = x.shape
             x = x.view(N, T, self.num_point, -1).permute(0, 3, 1, 2).contiguous().unsqueeze(-1)
         N, C, T, V, M = x.size()
 
         x = x.permute(0, 4, 3, 1, 2).contiguous().view(N, M * V * C, T)
-        x = self.data_bn(x)
+        # N C T V M -> N M V C T -> N MVC T
+        # print(x.shape)
+        x = self.data_bn(x)  # batch_normalize
+        # print(x.shape)
         x = x.view(N, M, V, C, T).permute(0, 1, 3, 4, 2).contiguous().view(N * M, C, T, V)
+        # N MVC T -> N M V C T -> N M C T V -> NM C T V
         x = self.l1(x)
         x = self.l2(x)
         x = self.l3(x)

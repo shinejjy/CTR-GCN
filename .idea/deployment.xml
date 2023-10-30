@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" serverName="156" remoteFilesAllowedToDisappearOnAutoupload="false">
+  <component name="PublishConfigData" remoteFilesAllowedToDisappearOnAutoupload="false">
     <serverData>
-      <paths name="156">
+      <paths name="root@connect.westb.seetacloud.com:40056 password">
         <serverdata>
           <mappings>
-            <mapping deploy="/CTR-GCN" local="$PROJECT_DIR$" web="/" />
+            <mapping deploy="/root/autodl-tmp" local="$PROJECT_DIR$" />
           </mappings>
         </serverdata>
       </paths>

@@ -25,7 +25,7 @@ import yaml
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
 
-from torchlight import DictAction
+from torchlight.torchlight.io import DictAction
 
 
 # import resource
@@ -247,6 +247,8 @@ class Processor():
                     device_ids=self.arg.device,
                     output_device=self.output_device)
 
+        # print(len(self.data_loader['train']))
+
     def load_data(self):
         Feeder = import_class(self.arg.feeder)
         self.data_loader = dict()
@@ -278,6 +280,7 @@ class Processor():
 
         if self.arg.weights:
             self.global_step = int(arg.weights[:-3].split('-')[-1])
+            print('Start from {}.'.format(self.global_step))
             self.print_log('Load weights from {}.'.format(self.arg.weights))
             if '.pkl' in self.arg.weights:
                 with open(self.arg.weights, 'r') as f:
@@ -370,6 +373,7 @@ class Processor():
         return split_time
 
     def train(self, epoch, save_model=False):
+        print(save_model)
         self.model.train()
         self.print_log('Training epoch: {}'.format(epoch + 1))
         loader = self.data_loader['train']
@@ -504,7 +508,7 @@ class Processor():
     def start(self):
         if self.arg.phase == 'train':
             self.print_log('Parameters:\n{}\n'.format(str(vars(self.arg))))
-            self.global_step = self.arg.start_epoch * len(self.data_loader['train']) / self.arg.batch_size
+            self.global_step = self.arg.start_epoch * len(self.data_loader['train'])  # / self.arg.batch_size
             def count_parameters(model):
                 return sum(p.numel() for p in model.parameters() if p.requires_grad)
             self.print_log(f'# Parameters: {count_parameters(self.model)}')
@@ -561,7 +565,7 @@ if __name__ == '__main__':
     p = parser.parse_args()
     if p.config is not None:
         with open(p.config, 'r') as f:
-            default_arg = yaml.load(f)
+            default_arg = yaml.full_load(f)
         key = vars(p).keys()
         for k in default_arg.keys():
             if k not in key:

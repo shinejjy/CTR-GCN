@@ -4,3 +4,17 @@
 /data/NW-UCLA/all_sqe.zip
 /data/NW-UCLA/all_sqe/
 /data/nturgbd_raw/nturgb+d_skeletons/
+/data/ntu/raw_data/frames_cnt.txt
+/data/ntu/raw_data/frames_drop_skes.pkl
+/data/ntu/raw_data/raw_skes_data.pkl
+/data/ntu/denoised_data/denoised_failed_1.log
+/data/ntu/denoised_data/denoised_failed_2.log
+/data/ntu/denoised_data/frames_cnt.txt
+/data/ntu/denoised_data/missing_skes.log
+/data/ntu/denoised_data/missing_skes_1.log
+/data/ntu/denoised_data/missing_skes_2.log
+/data/ntu/denoised_data/noise_length.log
+/data/ntu/denoised_data/noise_motion.log
+/data/ntu/denoised_data/noise_spread.log
+/data/ntu/denoised_data/raw_denoised_colors.pkl
+/data/ntu/denoised_data/raw_denoised_joints.pkl
