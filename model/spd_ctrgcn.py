@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
+from model.spd.nn import BiMap, LogEig, ReEig
 
 
 def import_class(name):
@@ -152,7 +153,7 @@ class CTRGC_1(nn.Module):
     def __init__(self, in_channels, out_channels, rel_reduction=8, mid_reduction=1):
         super(CTRGC_1, self).__init__()
         self.in_channels = in_channels
-        self.out_channels = out_channels
+        self.out_channels = out_channels - 1
         if in_channels == 3 or in_channels == 9:
             self.rel_channels = 8
             self.mid_channels = 16
@@ -205,6 +206,20 @@ class CTRGC_2(nn.Module):
 #         x1 = self.ctrgc1(x)
 #         x1 = self.ctrgc2(x, x1)
 #         return x1
+
+class unit_spd(nn.Module):
+    def __init__(self):
+        super(unit_spd, self).__init__()
+        self.bimap1 = BiMap(1, 1, 100, 50)
+        self.reEig1 = ReEig()
+        self.bimap2 = BiMap(1, 1, 50, 25)
+        self.logEig = LogEig()
+
+    def forward(self, x):
+        x = self.reEig1(self.bimap1(x))
+        x = self.logEig(self.bimap2(x))
+
+        return x
 
 
 class unit_tcn(nn.Module):
@@ -269,13 +284,13 @@ class unit_gcn(nn.Module):
         bn_init(self.bn, 1e-6)
 
         self.attention = MultiHeadSelfAttention(36, 36, 36, 6)
-        self.channel_pool1 = nn.Conv2d(self.out_c, 1, kernel_size=1)
         self.layer1 = nn.Linear(625, 36)
         self.relu2 = nn.ReLU(inplace=True)
         self.layer2 = nn.Linear(36, 625)
-        self.channel_pool2 = nn.Conv2d(1, self.out_c, kernel_size=1)
 
-    def forward(self, x):
+
+
+    def forward(self, x, spd_A):
         # (4, 3, 64, 25)
         y = None
         if self.adaptive:
@@ -290,11 +305,14 @@ class unit_gcn(nn.Module):
 
         x1 = torch.stack(x1, 0)
         VI, N, C, V, V = x1.shape
-        x2 = self.channel_pool1(x1.view(VI * N, C, V, V)).view(VI * N, V * V)
+        x2 = x1.permute(1, 0, 2, 3, 4).mean(-3).view(VI * N, V * V)
         x2 = self.relu2(self.layer1(x2)).view(N, VI, 36)
-        x2 = self.layer2(self.attention(x2).view(VI * N, 36)).view(N * VI, 1, V, V)
-        x2 = self.channel_pool2(x2).view(VI, N, C, V, V)
+        x2 = self.layer2(self.attention(x2).view(VI * N, 36)).view(N, VI, V, V)
+        x2 = x2.unsqueeze(-3).repeat(1, 1, C, 1, 1)
+        x2 = x2.permute(1, 0, 2, 3, 4)
         x1 = x1 + x2
+
+        x1 = torch.cat((x1, spd_A.expand(VI, N, -1, -1, -1)), dim=2)
 
         for i in range(self.num_subset):
             z = self.convs2[i](x, x1[i])
@@ -326,9 +344,9 @@ class TCN_GCN_unit(nn.Module):
         else:
             self.residual = unit_tcn(in_channels, out_channels, kernel_size=1, stride=stride)
 
-    def forward(self, x):
+    def forward(self, x, spd_A):
         # (4, 3, 64, 25)
-        y = self.relu(self.tcn1(self.gcn1(x)) + self.residual(x))
+        y = self.relu(self.tcn1(self.gcn1(x, spd_A)) + self.residual(x))
         return y
 
 
@@ -344,6 +362,11 @@ class Model(nn.Module):
             self.graph = Graph(**graph_args)
 
         A = self.graph.A  # 3,25,25
+
+        self.spd_A = self.graph.spd_A
+        self.pre_spd_conv = nn.Conv2d(6, 6, kernel_size=3, stride=3, padding=3)
+        self.spdn = unit_spd()
+        self.layer3 = nn.Linear(625, 36)
 
         self.num_class = num_class
         self.num_point = num_point
@@ -390,16 +413,24 @@ class Model(nn.Module):
         # print(x.shape)
         x = x.view(N, M, V, C, T).permute(0, 1, 3, 4, 2).contiguous().view(N * M, C, T, V)
         # N MVC T -> N M V C T -> N M C T V -> NM C T V
-        x = self.l1(x)
-        x = self.l2(x)
-        x = self.l3(x)
-        x = self.l4(x)
-        x = self.l5(x)
-        x = self.l6(x)
-        x = self.l7(x)
-        x = self.l8(x)
-        x = self.l9(x)
-        x = self.l10(x)
+
+        spd_A = Variable(torch.from_numpy(self.spd_A.astype(np.float32)), requires_grad=False)
+        spd_A = spd_A.view(1, 6, 25, 25).cuda(x.get_device())
+        spd_A = self.pre_spd_conv(spd_A).view(6, 100).cpu().detach().numpy()
+        spd_A = np.cov(spd_A, rowvar=False)
+        spd_A = torch.from_numpy(spd_A).to(torch.float32).view(1, 1, 100, 100).cuda(x.get_device())
+        spd_A = self.spdn(spd_A).cuda()
+
+        x = self.l1(x, spd_A)
+        x = self.l2(x, spd_A)
+        x = self.l3(x, spd_A)
+        x = self.l4(x, spd_A)
+        x = self.l5(x, spd_A)
+        x = self.l6(x, spd_A)
+        x = self.l7(x, spd_A)
+        x = self.l8(x, spd_A)
+        x = self.l9(x, spd_A)
+        x = self.l10(x, spd_A)
 
         # N*M,C,T,V
         c_new = x.size(1)

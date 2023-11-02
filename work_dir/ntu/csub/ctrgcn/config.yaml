@@ -1,7 +1,7 @@
-# command line: main.py --config config/nturgbd-cross-subject/default.yaml --work-dir work_dir/ntu/csub/ctrgcn --device 0 --num-worker 0 --save-epoch 0 --weights work_dir/ntu_new_graph/csub/ctrgcn/runs-12-30060.pt --start-epoch 12
+# command line: E:\jjy\my_project\CTR-GCN\main.py --config config/nturgbd-cross-subject/default.yaml --work-dir work_dir/ntu/csub/ctrgcn --device 0 --num-worker 0 --save-epoch 0
 
 base_lr: 0.1
-batch_size: 16
+batch_size: 32
 config: config/nturgbd-cross-subject/default.yaml
 device:
 - 0
@@ -32,11 +32,12 @@ seed: 1
 show_topk:
 - 1
 - 5
-start_epoch: 12
+spd: 0
+start_epoch: 0
 step:
 - 35
 - 55
-test_batch_size: 16
+test_batch_size: 64
 test_feeder_args:
   bone: false
   data_path: data/ntu/NTU60_CS.npz
@@ -63,5 +64,5 @@ train_feeder_args:
   window_size: 64
 warm_up_epoch: 5
 weight_decay: 0.0004
-weights: work_dir/ntu_new_graph/csub/ctrgcn/runs-12-30060.pt
+weights: null
 work_dir: work_dir/ntu/csub/ctrgcn

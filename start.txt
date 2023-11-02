@@ -11,3 +11,7 @@ python main.py --config config/nturgbd-cross-subject/default.yaml --work-dir wor
 python main.py --config config/nturgbd-cross-subject/default.yaml --work-dir work_dir/ntu_new_graph_model/csub/ctrgcn --device 0 --num-worker 0 --save-epoch 0 --model model.MyCtrgcn.Model --batch-size 32 ----weights work_dir/ntu_new_graph_model/csub/ctrgcn/runs-28-35056.pt --start-epoch 28 --step [30, 50]
 
 python main.py --config work_dir/ntu_new_graph/csub/ctrgcn/config.yaml --work-dir work_dir/ntu_new_graph/csub/ctrgcn --phase test --save-score True --weights work_dir/ntu_new_graph/csub/ctrgcn/runs-57-71364.pt --device 0
+
+python main.py --config config/nturgbd-cross-subject/default.yaml --work-dir work_dir/ntu/csub/spd_ctr --device 0 --num-worker 0 --save-epoch 0 --model model.spd_ctrgcn.Model --batch-size 16
+
+python main.py --config config/nturgbd-cross-subject/default-new.yaml --work-dir work_dir/ntu/csub/view_ctr --device 0 --num-worker 0 --save-epoch 0 --model model.MyCtrgcn.Model --batch-size 16

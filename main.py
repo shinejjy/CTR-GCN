@@ -24,6 +24,8 @@ import torch.optim as optim
 import yaml
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
+from model.spd.optimizers import MixOptimizer
+from model.spd.nn import BiMap, ReEig, LogEig
 
 from torchlight.torchlight.io import DictAction
 
@@ -62,6 +64,14 @@ def get_parser():
     # parameter priority: command line > config > default
     parser = argparse.ArgumentParser(
         description='Spatial Temporal Graph Convolution Network')
+
+    parser.add_argument(
+        '--spd',
+        type=int,
+        default=0,
+        help='use the spd net'
+    )
+
     parser.add_argument(
         '--work-dir',
         default='./work_dir/temp',
@@ -310,21 +320,44 @@ class Processor():
                 state.update(weights)
                 self.model.load_state_dict(state)
 
+        # if self.arg.spd == 1:
+        #     def move_modules_by_classes_to_cpu(model, target_classes):
+        #         for name, module in model.named_children():
+        #             for target_class in target_classes:
+        #                 if isinstance(module, target_class):
+        #                     module.to('cpu')  # 将包含目标类的模块移动到 CPU
+        #                     break  # 跳出内部循环，避免多次移动同一模块
+        #             else:
+        #                 # 如果当前模块不是目标类，递归查找其子模块
+        #                 move_modules_by_classes_to_cpu(module, target_classes)
+        #
+        #     spd_class = [BiMap, ReEig, LogEig]
+        #     move_modules_by_classes_to_cpu(self.model, spd_class)
+
     def load_optimizer(self):
-        if self.arg.optimizer == 'SGD':
-            self.optimizer = optim.SGD(
+        if self.arg.spd == 0:
+            if self.arg.optimizer == 'SGD':
+                self.optimizer = optim.SGD(
+                    self.model.parameters(),
+                    lr=self.arg.base_lr,
+                    momentum=0.9,
+                    nesterov=self.arg.nesterov,
+                    weight_decay=self.arg.weight_decay)
+            elif self.arg.optimizer == 'Adam':
+                self.optimizer = optim.Adam(
+                    self.model.parameters(),
+                    lr=self.arg.base_lr,
+                    weight_decay=self.arg.weight_decay)
+            else:
+                raise ValueError()
+
+        else:
+            self.optimizer = MixOptimizer(
                 self.model.parameters(),
                 lr=self.arg.base_lr,
                 momentum=0.9,
                 nesterov=self.arg.nesterov,
                 weight_decay=self.arg.weight_decay)
-        elif self.arg.optimizer == 'Adam':
-            self.optimizer = optim.Adam(
-                self.model.parameters(),
-                lr=self.arg.base_lr,
-                weight_decay=self.arg.weight_decay)
-        else:
-            raise ValueError()
 
         self.print_log('using warm up, epoch: {}'.format(self.arg.warm_up_epoch))
 
@@ -344,9 +377,13 @@ class Processor():
             else:
                 lr = self.arg.base_lr * (
                         self.arg.lr_decay_rate ** np.sum(epoch >= np.array(self.arg.step)))
-            for param_group in self.optimizer.param_groups:
-                param_group['lr'] = lr
-            return lr
+            if self.arg.spd == 0:
+                for param_group in self.optimizer.param_groups:
+                    param_group['lr'] = lr
+                return lr
+            else:
+                self.optimizer.adjust_learning_rate(lr)
+                return lr
         else:
             raise ValueError()
 
@@ -411,7 +448,10 @@ class Processor():
             self.train_writer.add_scalar('loss', loss.data.item(), self.global_step)
 
             # statistics
-            self.lr = self.optimizer.param_groups[0]['lr']
+            if self.arg.spd == 0:
+                self.lr = self.optimizer.param_groups[0]['lr']
+            else:
+                self.lr = self.optimizer.lr
             self.train_writer.add_scalar('lr', self.lr, self.global_step)
             timer['statistics'] += self.split_time()
 

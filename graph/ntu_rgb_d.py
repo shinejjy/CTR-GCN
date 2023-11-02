@@ -1,3 +1,4 @@
+import copy
 import sys
 import numpy as np
 import torch
@@ -56,10 +57,11 @@ class MyGraph:
         # self.inward = inward
         # self.outward = outward
         # self.neighbor = neighbor
-        self.partition_body = np.array(partition_body)
+        self.partition_body = partition_body
         self.hop_dis = tools.get_hop_distance(
             self.num_node, self.edge, max_hop=1)
         self.A = self.get_adjacency_matrix(labeling_mode)
+        self.spd_A = copy.deepcopy(self.A)
 
     def get_adjacency_matrix(self, labeling_mode=None):
         if labeling_mode is None:
@@ -81,7 +83,4 @@ class MyGraph:
 
 if __name__ == '__main__':
     graph = MyGraph()
-    for i in range(25):
-        for j in range(25):
-            print(graph.A[0, i, j], end=' ')
-        print()
+    print(graph.spd_A)

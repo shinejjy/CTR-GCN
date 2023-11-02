@@ -116,3 +116,7 @@
 [ Sat Oct 28 20:41:14 2023 ] 	Top1: 69.04%
 [ Sat Oct 28 20:41:14 2023 ] 	Top5: 93.90%
 [ Sat Oct 28 20:41:14 2023 ] Training epoch: 16
+[ Tue Oct 31 21:40:12 2023 ] Load weights from work_dir/ntu_new_graph/csub/ctrgcn/runs-57-71364.pt.
+[ Tue Oct 31 21:40:13 2023 ] using warm up, epoch: 5
+[ Tue Oct 31 22:28:34 2023 ] Load weights from work_dir/ntu_new_graph/csub/ctrgcn/runs-57-71364.pt.
+[ Tue Oct 31 22:28:36 2023 ] using warm up, epoch: 5
