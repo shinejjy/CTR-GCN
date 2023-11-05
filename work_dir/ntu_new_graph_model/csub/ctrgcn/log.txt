@@ -96,3 +96,5 @@
 
 [ Sun Oct 29 21:23:43 2023 ] # Parameters: 2852656
 [ Sun Oct 29 21:23:43 2023 ] Training epoch: 1
+[ Sat Nov  4 01:11:25 2023 ] Load weights from work_dir/ntu_new_graph_model/csub/ctrgcn/runs-65-81380.pt.
+[ Sat Nov  4 01:11:27 2023 ] using warm up, epoch: 5

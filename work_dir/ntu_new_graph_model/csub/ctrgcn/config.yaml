@@ -1,8 +1,8 @@
-# command line: main.py --config config/nturgbd-cross-subject/default.yaml --work-dir work_dir/ntu_new_graph_model/csub/ctrgcn --device 0 --num-worker 0 --save-epoch 0 --model model.MyCtrgcn.Model --batch-size 16
+# command line: main.py --config work_dir/ntu_new_graph_model/csub/ctrgcn/config.yaml --work-dir work_dir/ntu_new_graph_model/csub/ctrgcn --phase test --save-score True --weights work_dir/ntu_new_graph_model/csub/ctrgcn/runs-65-81380.pt --device 0
 
 base_lr: 0.1
 batch_size: 16
-config: config/nturgbd-cross-subject/default.yaml
+config: work_dir/ntu_new_graph_model/csub/ctrgcn/config.yaml
 device:
 - 0
 eval_interval: 5
@@ -23,15 +23,16 @@ nesterov: true
 num_epoch: 65
 num_worker: 0
 optimizer: SGD
-phase: train
+phase: test
 print_log: true
 save_epoch: 0
 save_interval: 1
-save_score: false
+save_score: true
 seed: 1
 show_topk:
 - 1
 - 5
+spd: 0
 start_epoch: 0
 step:
 - 35
@@ -63,5 +64,5 @@ train_feeder_args:
   window_size: 64
 warm_up_epoch: 5
 weight_decay: 0.0004
-weights: null
+weights: work_dir/ntu_new_graph_model/csub/ctrgcn/runs-65-81380.pt
 work_dir: work_dir/ntu_new_graph_model/csub/ctrgcn

@@ -273,6 +273,7 @@ class unit_gcn(nn.Module):
         self.relu2 = nn.ReLU(inplace=True)
         self.layer2 = nn.Linear(36, 625)
 
+
     def forward(self, x):
         # (4, 3, 64, 25)
         y = None

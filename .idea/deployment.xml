@@ -9,6 +9,13 @@
           </mappings>
         </serverdata>
       </paths>
+      <paths name="root@connect.westb.seetacloud.com:44825 password">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/root/autodl-tmp" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
     </serverData>
   </component>
 </project>

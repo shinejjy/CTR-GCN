@@ -210,15 +210,17 @@ class CTRGC_2(nn.Module):
 class unit_spd(nn.Module):
     def __init__(self):
         super(unit_spd, self).__init__()
-        self.bimap1 = BiMap(1, 1, 100, 25)
+        self.bimap1 = BiMap(1, 1, 225, 100)
         self.reEig1 = ReEig()
+        self.bimap2 = BiMap(1, 1, 100, 25)
         self.logEig = LogEig()
         self.conv = nn.Conv2d(1, 1, kernel_size=1)
-        self.active = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
         x = self.reEig1(self.bimap1(x))
-        x = self.active(self.conv(self.logEig(x)))
+        x = self.bimap2(x)
+        x = self.relu(self.conv(self.logEig(x)))
 
         return x
 
@@ -249,7 +251,7 @@ class unit_gcn(nn.Module):
         self.out_c = out_channels
         self.in_c = in_channels
         self.adaptive = adaptive
-        self.num_subset = A.shape[0] + 1
+        self.num_subset = A.shape[0]
         self.convs1 = nn.ModuleList()
         for i in range(self.num_subset):
             self.convs1.append(CTRGC_1(in_channels, out_channels))
@@ -289,8 +291,6 @@ class unit_gcn(nn.Module):
         self.relu2 = nn.ReLU(inplace=True)
         self.layer2 = nn.Linear(36, 625)
 
-
-
     def forward(self, x, spd_A):
         # (4, 3, 64, 25)
         y = None
@@ -299,7 +299,7 @@ class unit_gcn(nn.Module):
         else:
             A = self.A.cuda(x.get_device())
 
-        A = torch.cat((A, spd_A), dim=0)
+        A = A + spd_A
 
         x1 = []
         # 直接相加？
@@ -308,24 +308,16 @@ class unit_gcn(nn.Module):
 
         x1 = torch.stack(x1, 0)
         VI, N, C, V, V = x1.shape
-        body_x1 = x1[: 6]
-        x2 = body_x1.permute(1, 0, 2, 3, 4).mean(-3).view((VI - 1) * N, V * V)
-        x2 = self.relu2(self.layer1(x2)).view(N, (VI - 1), 36)
-        x2 = self.layer2(self.attention(x2).view((VI - 1) * N, 36)).view(N, (VI - 1), V, V)
+        x2 = x1.permute(1, 0, 2, 3, 4).mean(-3).view(VI * N, V * V)
+        x2 = self.relu2(self.layer1(x2)).view(N, VI, 36)
+        x2 = self.layer2(self.attention(x2).view(VI * N, 36)).view(N, VI, V, V)
         x2 = x2.unsqueeze(-3).repeat(1, 1, C, 1, 1)
         x2 = x2.permute(1, 0, 2, 3, 4)
-        body_x1 = body_x1 + x2
-        x1 = torch.cat((body_x1, x1[6: 7]), dim=0)
-
-        alpha = 0.01
+        x1 = x1 + x2
 
         for i in range(self.num_subset):
             z = self.convs2[i](x, x1[i])
-            if i == self.num_subset - 1:
-                y = alpha * z + y
-            else:
-                y = z + y if y is not None else z
-
+            y = z + y if y is not None else z
 
         y = self.bn(y)
         y += self.down(x)
@@ -359,7 +351,7 @@ class TCN_GCN_unit(nn.Module):
         return y
 
 
-class Model(nn.Module):
+class Model1(nn.Module):
     def __init__(self, num_class=60, num_point=25, num_person=2, graph=None, graph_args=dict(), in_channels=3,
                  drop_out=0, adaptive=True):
         super(Model, self).__init__()
@@ -373,7 +365,7 @@ class Model(nn.Module):
         A = self.graph.A  # 6,25,25
 
         self.spd_A = nn.Parameter(torch.from_numpy(self.graph.spd_A.astype(np.float32)))
-        self.pre_spd_conv = nn.Conv2d(6, 6, kernel_size=3, stride=3, padding=3)
+        self.pre_spd_conv = nn.Conv2d(6, 6, kernel_size=3, stride=2, padding=3)
         self.spdn = unit_spd()
         self.layer3 = nn.Linear(625, 36)
 
@@ -424,9 +416,9 @@ class Model(nn.Module):
         # N MVC T -> N M V C T -> N M C T V -> NM C T V
 
         spd_A = self.spd_A.view(1, 6, 25, 25).cuda(x.get_device())
-        spd_A = self.pre_spd_conv(spd_A).view(6, 100).cpu().detach().numpy()
+        spd_A = self.pre_spd_conv(spd_A).view(6, 225).cpu().detach().numpy()
         spd_A = np.cov(spd_A, rowvar=False)
-        spd_A = torch.from_numpy(spd_A).to(torch.float32).view(1, 1, 100, 100).cuda(x.get_device())
+        spd_A = torch.from_numpy(spd_A).to(torch.float32).view(1, 1, 225, 225).cuda(x.get_device())
         spd_A = self.spdn(spd_A).cuda().view(1, 25, 25)
 
         x = self.l1(x, spd_A)
@@ -488,3 +480,116 @@ class MultiHeadSelfAttention(nn.Module):
         att = torch.matmul(dist, v)  # batch, nh, n, dv
         att = att.transpose(1, 2).reshape(batch, n, self.dim_v)  # batch, n, dim_v
         return att
+
+
+class Model(nn.Module):
+    def __init__(self, num_class=60, num_point=25, num_person=2, graph=None, graph_args=dict(), in_channels=3,
+                 drop_out=0, adaptive=True):
+        super(Model, self).__init__()
+
+        if graph is None:
+            raise ValueError()
+        else:
+            Graph = import_class(graph)
+            self.graph = Graph(**graph_args)
+
+        self.stage1 = Stage1(self.graph)
+        self.stage2 = Stage2(num_class, num_point, num_person, self.graph, in_channels, drop_out, adaptive)
+
+    def forward(self, x):
+        spd_A = self.stage1()
+        x = self.stage2(x, spd_A)
+        return x
+
+
+class Stage1(nn.Module):
+    def __init__(self, graph):
+        super(Stage1, self).__init__()
+        self.spd_A = nn.Parameter(torch.from_numpy(graph.spd_A.astype(np.float32)))
+        self.pre_spd_conv = nn.Conv2d(6, 6, kernel_size=3, stride=2, padding=3)
+        self.spdn = unit_spd()
+        self.layer3 = nn.Linear(625, 36)
+        self.beta = nn.Parameter(torch.zeros(1))
+
+
+    def forward(self):
+        spd_A = self.spd_A.view(1, 6, 25, 25)
+        spd_A = self.pre_spd_conv(spd_A).view(6, 225).detach().numpy()
+        spd_A = np.cov(spd_A, rowvar=False)
+        spd_A = torch.from_numpy(spd_A).to(torch.float32).view(1, 1, 225, 225)
+        spd_A = self.spdn(spd_A).view(1, 25, 25)
+
+        return (self.beta * spd_A).cuda()
+
+
+class Stage2(nn.Module):
+    def __init__(self, num_class=60, num_point=25, num_person=2, graph=None, in_channels=3,
+                 drop_out=0, adaptive=True):
+        super(Stage2, self).__init__()
+
+        A = graph.A  # 6,25,25
+
+        self.num_class = num_class
+        self.num_point = num_point
+        self.data_bn = nn.BatchNorm1d(num_person * in_channels * num_point)
+
+        base_channel = 64
+        # (4, 3, 64, 25)
+        self.l1 = TCN_GCN_unit(in_channels, base_channel, A, residual=False, adaptive=adaptive)
+        self.l2 = TCN_GCN_unit(base_channel, base_channel, A, adaptive=adaptive)
+        self.l3 = TCN_GCN_unit(base_channel, base_channel, A, adaptive=adaptive)
+        self.l4 = TCN_GCN_unit(base_channel, base_channel, A, adaptive=adaptive)
+        self.l5 = TCN_GCN_unit(base_channel, base_channel * 2, A, stride=2, adaptive=adaptive)
+        self.l6 = TCN_GCN_unit(base_channel * 2, base_channel * 2, A, adaptive=adaptive)
+        self.l7 = TCN_GCN_unit(base_channel * 2, base_channel * 2, A, adaptive=adaptive)
+        self.l8 = TCN_GCN_unit(base_channel * 2, base_channel * 4, A, stride=2, adaptive=adaptive)
+        self.l9 = TCN_GCN_unit(base_channel * 4, base_channel * 4, A, adaptive=adaptive)
+        self.l10 = TCN_GCN_unit(base_channel * 4, base_channel * 4, A, adaptive=adaptive)
+
+        self.fc = nn.Linear(base_channel * 4, num_class)
+        nn.init.normal_(self.fc.weight, 0, math.sqrt(2. / num_class))
+        bn_init(self.data_bn, 1)
+        if drop_out:
+            self.drop_out = nn.Dropout(drop_out)
+        else:
+            self.drop_out = lambda x: x
+
+    def forward(self, x, spd_A):
+        """
+            N 视频个数(batch_size)
+            C = 3 (X,Y,S)代表一个点的信息(位置+预测的可能性)
+            T = 64 一个视频的帧数paper规定是64帧，不足的重头循环，多的clip
+            V 25 数据集中25个结点
+            M = 2 人数，paper中将人数限定在最大2个人
+        """
+        if len(x.shape) == 3:
+            N, T, VC = x.shape
+            x = x.view(N, T, self.num_point, -1).permute(0, 3, 1, 2).contiguous().unsqueeze(-1)
+        N, C, T, V, M = x.size()
+
+        x = x.permute(0, 4, 3, 1, 2).contiguous().view(N, M * V * C, T)
+        # N C T V M -> N M V C T -> N MVC T
+        # print(x.shape)
+        x = self.data_bn(x)  # batch_normalize
+        # print(x.shape)
+        x = x.view(N, M, V, C, T).permute(0, 1, 3, 4, 2).contiguous().view(N * M, C, T, V)
+        # N MVC T -> N M V C T -> N M C T V -> NM C T V
+
+        x = self.l1(x, spd_A)
+        x = self.l2(x, spd_A)
+        x = self.l3(x, spd_A)
+        x = self.l4(x, spd_A)
+        x = self.l5(x, spd_A)
+        x = self.l6(x, spd_A)
+        x = self.l7(x, spd_A)
+        x = self.l8(x, spd_A)
+        x = self.l9(x, spd_A)
+        x = self.l10(x, spd_A)
+
+        # N*M,C,T,V
+        c_new = x.size(1)
+        x = x.view(N, M, c_new, -1)
+        x = x.mean(3).mean(1)
+        x = self.drop_out(x)
+
+        return self.fc(x)

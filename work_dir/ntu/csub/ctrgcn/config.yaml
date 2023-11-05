@@ -1,4 +1,4 @@
-# command line: E:\jjy\my_project\CTR-GCN\main.py --config config/nturgbd-cross-subject/default.yaml --work-dir work_dir/ntu/csub/ctrgcn --device 0 --num-worker 0 --save-epoch 0
+# command line: main.py --config config/nturgbd-cross-subject/default.yaml --work-dir work_dir/ntu/csub/ctrgcn --device 0 --num-worker 0 --save-epoch 0 --weights work_dir/ntu/csub/ctrgcn/runs-7-8141.pt --start-epoch 7
 
 base_lr: 0.1
 batch_size: 32
@@ -12,7 +12,7 @@ log_interval: 100
 lr_decay_rate: 0.1
 model: model.ctrgcn.Model
 model_args:
-  graph: graph.ntu_rgb_d.MyGraph
+  graph: graph.ntu_rgb_d.Graph
   graph_args:
     labeling_mode: spatial
   num_class: 60
@@ -33,7 +33,7 @@ show_topk:
 - 1
 - 5
 spd: 0
-start_epoch: 0
+start_epoch: 7
 step:
 - 35
 - 55
@@ -64,5 +64,5 @@ train_feeder_args:
   window_size: 64
 warm_up_epoch: 5
 weight_decay: 0.0004
-weights: null
+weights: work_dir/ntu/csub/ctrgcn/runs-7-8141.pt
 work_dir: work_dir/ntu/csub/ctrgcn

@@ -145,3 +145,7 @@ Please cite this work if you find it useful:.
 
 # Contact
 For any questions, feel free to contact: `chenyuxin2019@ia.ac.cn`
+
+```
+python main2.py --config config/nturgbd-cross-subject/default-new.yaml --work-dir work_dir/ntu/csub/spd_ctr_cross --device 0 --num-worker 0 --save-epoch 0 --model model.spd_ctrgcn_1cpu_2cuda.Model --batch-size 16 --spd 1
+```

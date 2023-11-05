@@ -269,11 +269,10 @@ class unit_gcn(nn.Module):
         bn_init(self.bn, 1e-6)
 
         self.attention = MultiHeadSelfAttention(36, 36, 36, 6)
-        self.channel_pool1 = nn.Conv2d(self.out_c, 1, kernel_size=1)
         self.layer1 = nn.Linear(625, 36)
         self.relu2 = nn.ReLU(inplace=True)
         self.layer2 = nn.Linear(36, 625)
-        self.channel_pool2 = nn.Conv2d(1, self.out_c, kernel_size=1)
+
 
     def forward(self, x):
         # (4, 3, 64, 25)
@@ -290,10 +289,11 @@ class unit_gcn(nn.Module):
 
         x1 = torch.stack(x1, 0)
         VI, N, C, V, V = x1.shape
-        x2 = self.channel_pool1(x1.view(VI * N, C, V, V)).view(VI * N, V * V)
+        x2 = x1.permute(1, 0, 2, 3, 4).mean(-3).view(VI * N, V * V)
         x2 = self.relu2(self.layer1(x2)).view(N, VI, 36)
-        x2 = self.layer2(self.attention(x2).view(VI * N, 36)).view(N * VI, 1, V, V)
-        x2 = self.channel_pool2(x2).view(VI, N, C, V, V)
+        x2 = self.layer2(self.attention(x2).view(VI * N, 36)).view(N, VI, V, V)
+        x2 = x2.unsqueeze(-3).repeat(1, 1, C, 1, 1)
+        x2 = x2.permute(1, 0, 2, 3, 4)
         x1 = x1 + x2
 
         for i in range(self.num_subset):

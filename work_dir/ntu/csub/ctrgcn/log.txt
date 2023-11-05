@@ -263,3 +263,11 @@
 
 [ Sat Oct 28 18:36:45 2023 ] # Parameters: 2357166
 [ Sat Oct 28 18:36:45 2023 ] Training epoch: 13
+[ Sat Nov  4 09:26:08 2023 ] Load weights from work_dir/ntu/csub/ctrgcn/runs-7-8141.pt.
+[ Sat Nov  4 09:27:49 2023 ] Load weights from work_dir/ntu/csub/ctrgcn/runs-7-8141.pt.
+[ Sat Nov  4 09:27:51 2023 ] using warm up, epoch: 5
+[ Sat Nov  4 09:28:03 2023 ] Parameters:
+{'spd': 0, 'work_dir': 'work_dir/ntu/csub/ctrgcn', 'model_saved_name': 'work_dir/ntu/csub/ctrgcn\\runs', 'config': 'config/nturgbd-cross-subject/default.yaml', 'phase': 'train', 'save_score': False, 'seed': 1, 'log_interval': 100, 'save_interval': 1, 'save_epoch': 0, 'eval_interval': 5, 'print_log': True, 'show_topk': [1, 5], 'feeder': 'feeders.feeder_ntu.Feeder', 'num_worker': 0, 'train_feeder_args': {'data_path': 'data/ntu/NTU60_CS.npz', 'split': 'train', 'debug': False, 'random_choose': False, 'random_shift': False, 'random_move': False, 'window_size': 64, 'normalization': False, 'random_rot': True, 'p_interval': [0.5, 1], 'vel': False, 'bone': False}, 'test_feeder_args': {'data_path': 'data/ntu/NTU60_CS.npz', 'split': 'test', 'window_size': 64, 'p_interval': [0.95], 'vel': False, 'bone': False, 'debug': False}, 'model': 'model.ctrgcn.Model', 'model_args': {'num_class': 60, 'num_point': 25, 'num_person': 2, 'graph': 'graph.ntu_rgb_d.Graph', 'graph_args': {'labeling_mode': 'spatial'}}, 'weights': 'work_dir/ntu/csub/ctrgcn/runs-7-8141.pt', 'ignore_weights': [], 'base_lr': 0.1, 'step': [35, 55], 'device': [0], 'optimizer': 'SGD', 'nesterov': True, 'batch_size': 32, 'test_batch_size': 64, 'start_epoch': 7, 'num_epoch': 65, 'weight_decay': 0.0004, 'lr_decay_rate': 0.1, 'warm_up_epoch': 5}
+
+[ Sat Nov  4 09:28:03 2023 ] # Parameters: 1446672
+[ Sat Nov  4 09:28:03 2023 ] Training epoch: 8
