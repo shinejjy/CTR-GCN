@@ -432,7 +432,7 @@ class Processor():
         process = tqdm(loader, ncols=40)
 
         if epoch % 2 == 0:
-            self.model.stage1.eval()
+            self.model.stage1.train()
             self.model.stage2.train()
             stage = 2
         else:
@@ -454,8 +454,10 @@ class Processor():
 
             if stage == 1:
                 self.optimizer1.zero_grad()
+                self.optimizer2.zero_grad()
                 loss.backward()
                 self.optimizer1.step()
+                self.optimizer2.step()
             else:
                 self.optimizer2.zero_grad()
                 loss.backward()

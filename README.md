@@ -148,4 +148,6 @@ For any questions, feel free to contact: `chenyuxin2019@ia.ac.cn`
 
 ```
 python main2.py --config config/nturgbd-cross-subject/default-new.yaml --work-dir work_dir/ntu/csub/spd_ctr_cross --device 0 --num-worker 0 --save-epoch 0 --model model.spd_ctrgcn_1cpu_2cuda.Model --batch-size 16 --spd 1
+python main.py --config config/nturgbd-cross-subject/default-new.yaml --work-dir work_dir/ntu/csub/spd_ctr --device 0 --num-worker 0 --save-epoch 0 --model model.spd_ctrgcn2.Model --batch-size 16 --spd 1
+python main.py --config config/nturgbd-cross-subject/default-new.yaml --work-dir work_dir/ntu_new_graph_model/csub/ctrgcn1 --device 0 --num-worker 0 --save-epoch 0 --model model.MyCtrgcn.Model --batch-size 32 --weights work_dir/ntu_new_graph_model/csub/ctrgcn1/runs-65-81380.pt --start-epoch 65 --num-epoch 80
 ```

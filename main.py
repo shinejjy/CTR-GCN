@@ -248,7 +248,10 @@ class Processor():
         self.best_acc = 0
         self.best_acc_epoch = 0
 
-        self.model = self.model.cuda(self.output_device)
+        if self.arg.spd == 1:
+            self.model.stage2 = self.model.stage2.cuda(self.output_device)
+        else:
+            self.model = self.model.cuda(self.output_device)
 
         if type(self.arg.device) is list:
             if len(self.arg.device) > 1:
