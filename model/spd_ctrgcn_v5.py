@@ -483,6 +483,20 @@ class Stage2(nn.Module):
         else:
             self.drop_out = lambda x: x
 
+        # Retrospect Model
+        self.first_tram = nn.Sequential(
+            nn.AvgPool2d((4, 1)),
+            nn.Conv2d(64, 256, 1),
+            nn.BatchNorm2d(256),
+            nn.ReLU()
+        )
+        self.second_tram = nn.Sequential(
+            nn.AvgPool2d((2, 1)),
+            nn.Conv2d(128, 256, 1),
+            nn.BatchNorm2d(256),
+            nn.ReLU()
+        )
+
     def forward(self, x, spd_A):
         """
             N 视频个数(batch_size)
@@ -508,12 +522,18 @@ class Stage2(nn.Module):
         x = self.l2(x, spd_A)  # (N*M, 64, 64, 25)
         x = self.l3(x, spd_A)  # (N*M, 64, 64, 25)
         x = self.l4(x, spd_A)  # (N*M, 64, 64, 25)
+        x2 = x
         x = self.l5(x, spd_A)  # (N*M, 128, 32, 25)
         x = self.l6(x, spd_A)  # (N*M, 128, 32, 25)
         x = self.l7(x, spd_A)  # (N*M, 128, 32, 25)
+        x3 = x
         x = self.l8(x, spd_A)  # (N*M, 256, 16, 25)
         x = self.l9(x, spd_A)  # (N*M, 256, 16, 25)
         x = self.l10(x, spd_A)  # (N*M, 256, 16, 25)
+
+        x2 = self.first_tram(x2)
+        x3 = self.second_tram(x3)
+        x = x + x2 + x3
 
         # N*M,C,T,V
         c_new = x.size(1)

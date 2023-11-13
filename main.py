@@ -27,7 +27,7 @@ from tqdm import tqdm
 from model.spd.optimizers import MixOptimizer
 from model.spd.nn import BiMap, ReEig, LogEig
 
-from torchlight.torchlight.io import DictAction
+from torchlight.io import DictAction
 
 
 # import resource
