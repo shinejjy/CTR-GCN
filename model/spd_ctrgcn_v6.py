@@ -196,32 +196,6 @@ class CTRGC_2(nn.Module):
         return x1
 
 
-# class CTRGC(nn.Module):
-#     def __init__(self, in_channels, out_channels, rel_reduction=8, mid_reduction=1):
-#         super(CTRGC, self).__init__()
-#         self.ctrgc1 = CTRGC_1(in_channels, out_channels, rel_reduction, mid_reduction)
-#         self.ctrgc2 = CTRGC_2()
-#
-#     def forward(self, x):
-#         x1 = self.ctrgc1(x)
-#         x1 = self.ctrgc2(x, x1)
-#         return x1
-
-class unit_spd(nn.Module):
-    def __init__(self):
-        super(unit_spd, self).__init__()
-        self.spd_net = nn.Sequential(
-            BiMap(1, 1, 17 * 17, 10 * 10),
-            ReEig(),
-            BiMap(1, 1, 10 * 10, 25),
-            LogEig()
-        )
-
-    def forward(self, x):
-        x = self.spd_net(x)
-        return x
-
-
 class unit_tcn(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=9, stride=1):
         super(unit_tcn, self).__init__()
@@ -318,7 +292,7 @@ class unit_gcn(nn.Module):
         A_at2 = A_at2.permute(1, 0, 2, 3, 4)  # VI, N, C, V, V
         A_at = A_at + A_at2
 
-        A_fn = A_at + self.gamma * A_P   # 由样本得出的A + 自适应A + 原始A + 流行统计A
+        A_fn = A_at + self.gamma * A_P  # 由样本得出的A + 自适应A + 原始A + 流行统计A
 
         for i in range(self.num_subset):
             z = self.convs2[i](x, A_fn[i])
@@ -397,61 +371,63 @@ class MultiHeadSelfAttention(nn.Module):
         return att
 
 
-class Model(nn.Module):
-    def __init__(self, num_class=60, num_point=25, num_person=2, graph=None, graph_args=dict(), in_channels=3,
-                 drop_out=0):
-        super(Model, self).__init__()
-
-        if graph is None:
-            raise ValueError()
-        else:
-            Graph = import_class(graph)
-            self.graph = Graph(**graph_args)
-
-        self.stage1 = Stage1(self.graph, c_dim=17)
-        self.stage2 = Stage2(num_class, num_point, num_person, self.graph, in_channels, drop_out)
+class unit_spd(nn.Module):
+    def __init__(self, dims):
+        super(unit_spd, self).__init__()
+        self.spd_net = nn.ModuleList()
+        for i in range(len(dims) - 1):
+            self.spd_net.append(BiMap(1, 1, dims[i], dims[i + 1]))
+            self.spd_net.append(ReEig())
+        self.spd_net.append(LogEig())
+        self.spd_net = nn.Sequential(*self.spd_net)
 
     def forward(self, x):
-        spd_A = self.stage1().cuda(x.get_device())
-        x = self.stage2(x, spd_A)
+        x = self.spd_net(x)
         return x
 
 
 class Stage1(nn.Module):
-    def __init__(self, graph, c_dim=21):
+    def __init__(self, graph, c_dim=21, view_dim_emb=12):
         super(Stage1, self).__init__()
+        # view_embedding_dimensions
+        self.view_dim_emb = view_dim_emb
+
         self.spd_A = nn.Parameter(torch.from_numpy(graph.spd_A.astype(np.float32)))
-        # self.pre_spd_conv = nn.Conv2d(6, 6, kernel_size=3, stride=2, padding=3)
+
+        # pre_spd
         self.pre_spd_conv = nn.Sequential(
-            nn.Conv2d(6, 6, kernel_size=5),
+            nn.Conv2d(6, self.view_dim_emb, kernel_size=5),
             nn.ReLU(inplace=True),
-            nn.Conv2d(6, 6, kernel_size=5),
+            nn.Conv2d(self.view_dim_emb, self.view_dim_emb, kernel_size=5),
             nn.ReLU(inplace=True),
         )
-        self.spdn = unit_spd()
-        self.layer3 = nn.Linear(625, 36)
+
+        # SPD net
+        self.spdn = unit_spd([17 * 17, 100, 25])
         self.c_dim = c_dim
 
-        self.conv = nn.Conv2d(1, 1, kernel_size=1)
-        self.relu = nn.ReLU(inplace=True)
+        # after_spd
+        self.after_spd = nn.Sequential(
+            nn.Conv2d(1, 1, kernel_size=1),
+            nn.ReLU(inplace=True)
+        )
 
     def forward(self):
         device = self.spd_A.device
         self.spdn = self.spdn.to('cpu')
         spd_A = self.spd_A.view(1, 6, 25, 25)
-        spd_A = self.pre_spd_conv(spd_A).view(6, self.c_dim ** 2).detach().cpu().numpy()
+        spd_A = self.pre_spd_conv(spd_A).view(self.view_dim_emb, self.c_dim ** 2).detach().cpu().numpy()
         spd_A = np.cov(spd_A, rowvar=False)
         spd_A = torch.from_numpy(spd_A).to(torch.float32).view(1, 1, self.c_dim ** 2, self.c_dim ** 2)
         spd_A = self.spdn(spd_A).view(1, 25, 25)
         spd_A = spd_A.to(device)
-        spd_A = self.relu(self.conv(spd_A))
+        spd_A = self.after_spd(spd_A)
 
         return spd_A
 
 
 class Stage2(nn.Module):
-    def __init__(self, num_class=60, num_point=25, num_person=2, graph=None, in_channels=3,
-                 drop_out=0):
+    def __init__(self, num_class=60, num_point=25, num_person=2, graph=None, in_channels=3, drop_out=0):
         super(Stage2, self).__init__()
 
         A = graph.A  # 6,25,25
@@ -462,7 +438,7 @@ class Stage2(nn.Module):
         self.data_bn = nn.BatchNorm1d(num_person * in_channels * num_point)
 
         base_channel = 64
-        # (4, 3, 64, 25)
+        # (N*M, 3, 64, 25)
         self.l1 = TCN_GCN_unit(in_channels, base_channel, A, A_P, residual=False)
         self.l2 = TCN_GCN_unit(base_channel, base_channel, A, A_P)
         self.l3 = TCN_GCN_unit(base_channel, base_channel, A, A_P)
@@ -541,3 +517,23 @@ class Stage2(nn.Module):
         x = self.drop_out(x)
 
         return self.fc(x)
+
+
+class Model(nn.Module):
+    def __init__(self, num_class=60, num_point=25, num_person=2, graph=None, graph_args=dict(), in_channels=3,
+                 drop_out=0):
+        super(Model, self).__init__()
+
+        if graph is None:
+            raise ValueError()
+        else:
+            Graph = import_class(graph)
+            self.graph = Graph(**graph_args)
+
+        self.stage1 = Stage1(self.graph, c_dim=17)
+        self.stage2 = Stage2(num_class, num_point, num_person, self.graph, in_channels, drop_out)
+
+    def forward(self, x):
+        spd_A = self.stage1().cuda(x.get_device())
+        x = self.stage2(x, spd_A)
+        return x
