@@ -260,6 +260,7 @@ class Processor():
                     device_ids=self.arg.device,
                     output_device=self.output_device)
 
+
         # print(len(self.data_loader['train']))
 
     def load_data(self):

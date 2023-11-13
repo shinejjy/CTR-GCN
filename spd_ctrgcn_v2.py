@@ -1,3 +1,7 @@
+"""
+batch_size: 32
+Acc: 89.8%
+"""
 import math
 import pdb
 
@@ -287,16 +291,12 @@ class unit_gcn(nn.Module):
                 bn_init(m, 1)
         bn_init(self.bn, 1e-6)
 
-        self.attention1 = MultiHeadSelfAttention(36, 36, 36, 6)
-        self.layer_norm1 = nn.LayerNorm([6, 36])
-        self.attention2 = MultiHeadSelfAttention(36, 36, 36, 6)
-        self.layer_norm2 = nn.LayerNorm([6, 36])
-
+        self.attention = MultiHeadSelfAttention(36, 36, 36, 6)
         self.layer1 = nn.Linear(625, 36)
         self.relu2 = nn.ReLU(inplace=True)
         self.layer2 = nn.Linear(36, 625)
-        self.conv1 = nn.Conv2d(out_channels, 1, kernel_size=1)
-        self.conv2 = nn.Conv2d(1, out_channels, kernel_size=1)
+        self.relu3 = nn.ReLU(inplace=True)
+        self.conv = nn.Conv2d(1, out_channels, kernel_size=1)
 
     def forward(self, x, spd_A):
         # (4, 3, 64, 25)
@@ -316,15 +316,11 @@ class unit_gcn(nn.Module):
         x1 = torch.stack(x1, 0)
         VI, N, C, V, V = x1.shape
         x2 = x1.permute(1, 0, 2, 3, 4).mean(-3).view(VI * N, V * V)
-        # x2 = self.conv1(x1.view(VI * N, C, V, V)).view(VI * N, V * V)
         x2 = self.relu2(self.layer1(x2)).view(N, VI, 36)
-
-        x2 = x2 + self.layer_norm1(self.attention1(x2))
-        x2 = x2 + self.layer_norm2(self.attention2(x2))
-
-        x2 = self.layer2(x2.view(VI * N, 36)).view(N * VI, V, V)
+        x2 = self.layer2(self.attention(x2).view(VI * N, 36)).view(N * VI, V, V)
+        x2 = self.relu3(x2)
         # x2 = x2.unsqueeze(-3).repeat(1, 1, C, 1, 1)
-        x2 = self.conv2(x2.unsqueeze(-3)).view(N, VI, C, V, V)
+        x2 = self.conv(x2.unsqueeze(-3)).view(N, VI, C, V, V)
         x2 = x2.permute(1, 0, 2, 3, 4)
         x1 = x1 + x2
 

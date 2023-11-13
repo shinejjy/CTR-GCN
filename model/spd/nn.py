@@ -21,6 +21,7 @@ class BiMap(nn.Module):
 
 
     def forward(self,X):
+        self._W = self._W.to('cpu')
         return functional.bimap_channels(X,self._W)
 
 class LogEig(nn.Module):

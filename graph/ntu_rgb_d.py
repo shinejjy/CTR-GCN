@@ -62,6 +62,7 @@ class MyGraph:
             self.num_node, self.edge, max_hop=1)
         self.A = self.get_adjacency_matrix(labeling_mode)
         self.spd_A = copy.deepcopy(self.A)
+        self.A_P = tools.get_spatial_graph_new(num_node, edge)
 
     def get_adjacency_matrix(self, labeling_mode=None):
         if labeling_mode is None:
