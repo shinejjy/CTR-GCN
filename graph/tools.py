@@ -53,6 +53,18 @@ def get_spatial_graph_new(num_node, edge):
     return A
 
 
+def get_spatial_graph_new_new(num_node, left_arm_part, right_arm_part,
+                              head_part, body_part, left_leg_part, right_leg_part):
+    LA = normalize_adjacency_matrix(edge2mat(left_arm_part, num_node))
+    RA = normalize_adjacency_matrix(edge2mat(right_arm_part, num_node))
+    H = normalize_adjacency_matrix(edge2mat(head_part, num_node))
+    B = normalize_adjacency_matrix(edge2mat(body_part, num_node))
+    LL = normalize_adjacency_matrix(edge2mat(left_leg_part, num_node))
+    RL = normalize_adjacency_matrix(edge2mat(right_leg_part, num_node))
+    A = np.stack((LA, RA, H, B, LL, RL))
+    return A
+
+
 def normalize_adjacency_matrix(A):
     node_degrees = A.sum(-1)
     degs_inv_sqrt = np.power(node_degrees, -0.5)
