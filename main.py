@@ -206,6 +206,16 @@ def get_parser():
         default=0.1,
         help='decay rate for learning rate')
     parser.add_argument('--warm_up_epoch', type=int, default=0)
+    parser.add_argument(
+        '--backstage',
+        type=int,
+        default=0
+    )
+    parser.add_argument(
+        '--delete',
+        type=int,
+        default=0
+    )
 
     return parser
 
@@ -223,11 +233,18 @@ class Processor():
                 arg.model_saved_name = os.path.join(arg.work_dir, 'runs')
                 if os.path.isdir(arg.model_saved_name):
                     print('log_dir: ', arg.model_saved_name, 'already exist')
-                    answer = input('delete it? y/n:')
+                    if arg.backstage == 1:
+                        if arg.delete == 1:
+                            answer = 'y'
+                        else:
+                            answer = 'n'
+                    else:
+                        answer = input('delete it? y/n:')
                     if answer == 'y':
                         shutil.rmtree(arg.model_saved_name)
                         print('Dir removed: ', arg.model_saved_name)
-                        input('Refresh the website of tensorboard by pressing any keys')
+                        if arg.backstage == 0:
+                            input('Refresh the website of tensorboard by pressing any keys')
                     else:
                         print('Dir not removed: ', arg.model_saved_name)
                 self.train_writer = SummaryWriter(os.path.join(arg.model_saved_name, 'train'), 'train')
@@ -252,8 +269,10 @@ class Processor():
         else:
             self.model = self.model.cuda(self.output_device)
 
+        self.multi_gpu = False
         if type(self.arg.device) is list:
             if len(self.arg.device) > 1:
+                self.multi_gpu = True
                 self.model = nn.DataParallel(
                     self.model,
                     device_ids=self.arg.device,
@@ -322,20 +341,6 @@ class Processor():
                     print('  ' + d)
                 state.update(weights)
                 self.model.load_state_dict(state)
-
-        # if self.arg.spd == 1:
-        #     def move_modules_by_classes_to_cpu(model, target_classes):
-        #         for name, module in model.named_children():
-        #             for target_class in target_classes:
-        #                 if isinstance(module, target_class):
-        #                     module.to('cpu')  # 将包含目标类的模块移动到 CPU
-        #                     break  # 跳出内部循环，避免多次移动同一模块
-        #             else:
-        #                 # 如果当前模块不是目标类，递归查找其子模块
-        #                 move_modules_by_classes_to_cpu(module, target_classes)
-        #
-        #     spd_class = [BiMap, ReEig, LogEig]
-        #     move_modules_by_classes_to_cpu(self.model, spd_class)
 
     def load_optimizer(self):
         if self.arg.spd == 0:
@@ -560,6 +565,10 @@ class Processor():
                         epoch + 1 == self.arg.num_epoch)) and (epoch+1) > self.arg.save_epoch
 
                 self.train(epoch, save_model=save_model)
+
+                if self.multi_gpu:
+                    device = self.model.module.stage1.spd_A.device
+                    self.model.module.stage1.spdn = self.model.module.stage1.spdn.to(device)
 
                 self.eval(epoch, save_score=self.arg.save_score, loader_name=['test'])
 

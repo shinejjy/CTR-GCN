@@ -214,7 +214,7 @@ class unit_tcn(nn.Module):
 
 
 class unit_gcn(nn.Module):
-    def __init__(self, in_channels, out_channels, A, coff_embedding=4, residual=True):
+    def __init__(self, in_channels, out_channels, A, coff_embedding=4, residual=True, ave=8):
         super(unit_gcn, self).__init__()
         # (4, 3, 64, 25)
         inter_channels = out_channels // coff_embedding
@@ -243,8 +243,6 @@ class unit_gcn(nn.Module):
 
         self.A = nn.Parameter(torch.from_numpy(A.astype(np.float32)))
         self.alpha = nn.Parameter(torch.zeros(1))
-        self.beta = nn.Parameter(torch.zeros(1))
-        self.gamma = nn.Parameter(torch.zeros(1))
         self.bn = nn.BatchNorm2d(out_channels)
         self.soft = nn.Softmax(-2)
         self.relu = nn.ReLU(inplace=True)
@@ -256,15 +254,16 @@ class unit_gcn(nn.Module):
                 bn_init(m, 1)
         bn_init(self.bn, 1e-6)
 
-        self.attention1 = MultiHeadSelfAttention(6, 6, 6, 1)
+        self.ave = ave
+        self.attention1 = MultiHeadSelfAttention(dim_in=self.ave, dim_k=self.ave // 2, dim_v=self.ave, num_heads=2)
 
-        self.adja_emb = nn.Conv2d(out_channels, 1, kernel_size=1)
-        self.conv2 = nn.Conv2d(1, out_channels, kernel_size=1)
+        self.adja_emb = nn.Conv2d(out_channels * 6, self.ave, kernel_size=1)
+        self.conv2 = nn.Conv2d(self.ave, out_channels * 6, kernel_size=1)
 
     def forward(self, x, A_spd, pos_emb):
         # (4, 3, 64, 25)
         y = None
-        A = self.A.cuda(x.get_device()) + self.beta * A_spd
+        A = self.A.cuda(x.get_device()) + A_spd
 
         A_at = []
         # 直接相加？
@@ -273,13 +272,15 @@ class unit_gcn(nn.Module):
 
         A_at = torch.stack(A_at, 0)
         VI, N, C, V, V = A_at.shape
-        A_at2 = self.adja_emb(A_at.view(N, C, V * V, VI)).view(N, V * V, VI)
+        A_at2 = self.adja_emb(A_at.view(N, C * VI, V, V))
+        _, C_em, _, _ = A_at2.shape
+        A_at2 = A_at2.view(N, V * V, C_em)
         # x2 = self.conv1(x1.view(VI * N, C, V, V)).view(VI * N, V * V)
 
-        A_at2 = self.attention1(A_at2 + pos_emb).view(N * VI, V, V)
+        A_at2 = self.attention1(A_at2 + pos_emb).view(N, C_em, V, V)
 
         # x2 = x2.unsqueeze(-3).repeat(1, 1, C, 1, 1)
-        A_at2 = self.conv2(A_at2.unsqueeze(-3)).view(N, VI, C, V, V)
+        A_at2 = self.conv2(A_at2).view(N, VI, C, V, V)
         A_at2 = A_at2.permute(1, 0, 2, 3, 4)  # VI, N, C, V, V
         A_fn = A_at + A_at2
 
@@ -295,11 +296,11 @@ class unit_gcn(nn.Module):
 
 
 class TCN_GCN_unit(nn.Module):
-    def __init__(self, in_channels, out_channels, A, A_P, stride=1, residual=True, kernel_size=5,
-                 dilations=[1, 2]):
+    def __init__(self, in_channels, out_channels, A, stride=1, residual=True, kernel_size=5,
+                 dilations=[1, 2], ave=8):
         super(TCN_GCN_unit, self).__init__()
         # (4, 3, 64, 25) , out=64
-        self.gcn1 = unit_gcn(in_channels, out_channels, A, A_P)
+        self.gcn1 = unit_gcn(in_channels, out_channels, A, ave=ave)
         self.tcn1 = MultiScale_TemporalConv(out_channels, out_channels, kernel_size=kernel_size, stride=stride,
                                             dilations=dilations,
                                             residual=False)
@@ -390,16 +391,10 @@ class Stage1(nn.Module):
             nn.Conv2d(self.view_dim_emb, self.view_dim_emb, kernel_size=5),
             nn.ReLU(inplace=True),
         )
-
+        self.beta = nn.Parameter(torch.zeros(1))
         # SPD net
         self.spdn = unit_spd([17 * 17, 100, 25])
         self.c_dim = c_dim
-
-        # after_spd
-        self.after_spd = nn.Sequential(
-            nn.Conv2d(1, 1, kernel_size=1),
-            nn.ReLU(inplace=True)
-        )
 
     def forward(self):
         device = self.spd_A.device
@@ -410,17 +405,15 @@ class Stage1(nn.Module):
         spd_A = torch.from_numpy(spd_A).to(torch.float32).view(1, 1, self.c_dim ** 2, self.c_dim ** 2)
         spd_A = self.spdn(spd_A).view(1, 25, 25)
         spd_A = spd_A.to(device)
-        spd_A = self.after_spd(spd_A)
 
-        return spd_A
+        return self.beta * spd_A
 
 
 class Stage2(nn.Module):
-    def __init__(self, num_class=60, num_point=25, num_person=2, graph=None, in_channels=3, drop_out=0):
+    def __init__(self, num_class=60, num_point=25, num_person=2, graph=None, in_channels=3, drop_out=0, ave=8):
         super(Stage2, self).__init__()
 
         A = graph.A  # 6,25,25
-        A_P = graph.A_P  # 1,25,25
 
         self.num_class = num_class
         self.num_point = num_point
@@ -428,16 +421,16 @@ class Stage2(nn.Module):
 
         base_channel = 64
         # (N*M, 3, 64, 25)
-        self.l1 = TCN_GCN_unit(in_channels, base_channel, A, A_P, residual=False)
-        self.l2 = TCN_GCN_unit(base_channel, base_channel, A, A_P)
-        self.l3 = TCN_GCN_unit(base_channel, base_channel, A, A_P)
-        self.l4 = TCN_GCN_unit(base_channel, base_channel, A, A_P)
-        self.l5 = TCN_GCN_unit(base_channel, base_channel * 2, A, A_P, stride=2)
-        self.l6 = TCN_GCN_unit(base_channel * 2, base_channel * 2, A, A_P)
-        self.l7 = TCN_GCN_unit(base_channel * 2, base_channel * 2, A, A_P)
-        self.l8 = TCN_GCN_unit(base_channel * 2, base_channel * 4, A, A_P, stride=2)
-        self.l9 = TCN_GCN_unit(base_channel * 4, base_channel * 4, A, A_P)
-        self.l10 = TCN_GCN_unit(base_channel * 4, base_channel * 4, A, A_P)
+        self.l1 = TCN_GCN_unit(in_channels, base_channel, A, residual=False, ave=ave)
+        self.l2 = TCN_GCN_unit(base_channel, base_channel, A, ave=ave)
+        self.l3 = TCN_GCN_unit(base_channel, base_channel, A, ave=ave)
+        self.l4 = TCN_GCN_unit(base_channel, base_channel, A, ave=ave)
+        self.l5 = TCN_GCN_unit(base_channel, base_channel * 2, A, stride=2, ave=ave)
+        self.l6 = TCN_GCN_unit(base_channel * 2, base_channel * 2, A, ave=ave)
+        self.l7 = TCN_GCN_unit(base_channel * 2, base_channel * 2, A, ave=ave)
+        self.l8 = TCN_GCN_unit(base_channel * 2, base_channel * 4, A, stride=2, ave=ave)
+        self.l9 = TCN_GCN_unit(base_channel * 4, base_channel * 4, A, ave=ave)
+        self.l10 = TCN_GCN_unit(base_channel * 4, base_channel * 4, A, ave=ave)
 
         self.fc = nn.Linear(base_channel * 4, num_class)
         nn.init.normal_(self.fc.weight, 0, math.sqrt(2. / num_class))
@@ -461,7 +454,7 @@ class Stage2(nn.Module):
             nn.ReLU()
         )
 
-        self.pos_embedding = nn.Parameter(torch.randn(1, self.num_point ** 2, 6))
+        self.pos_embedding = nn.Parameter(torch.randn(1, self.num_point ** 2, ave))
 
     def forward(self, x, spd_A):
         """

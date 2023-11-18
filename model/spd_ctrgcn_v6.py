@@ -300,7 +300,7 @@ class unit_gcn(nn.Module):
 
 
 class TCN_GCN_unit(nn.Module):
-    def __init__(self, in_channels, out_channels, A,  stride=1, residual=True, kernel_size=5,
+    def __init__(self, in_channels, out_channels, A, stride=1, residual=True, kernel_size=5,
                  dilations=[1, 2]):
         super(TCN_GCN_unit, self).__init__()
         # (4, 3, 64, 25) , out=64
@@ -400,11 +400,7 @@ class Stage1(nn.Module):
         self.spdn = unit_spd([17 * 17, 100, 25])
         self.c_dim = c_dim
 
-        # after_spd
-        # self.after_spd = nn.Sequential(
-        #     nn.Conv2d(1, 1, kernel_size=1),
-        #     nn.ReLU(inplace=True)
-        # )
+        self.beta = nn.Parameter(torch.zeros(1))
 
     def forward(self):
         device = self.spd_A.device
@@ -415,8 +411,9 @@ class Stage1(nn.Module):
         spd_A = torch.from_numpy(spd_A).to(torch.float32).view(1, 1, self.c_dim ** 2, self.c_dim ** 2)
         spd_A = self.spdn(spd_A).view(1, 25, 25)
         spd_A = spd_A.to(device)
+        self.spdn = self.spdn.to(device)
 
-        return spd_A
+        return self.beta * spd_A
 
 
 class Stage2(nn.Module):
@@ -431,11 +428,11 @@ class Stage2(nn.Module):
 
         base_channel = 64
         # (N*M, 3, 64, 25)
-        self.l1 = TCN_GCN_unit(in_channels, base_channel, A,  residual=False)
+        self.l1 = TCN_GCN_unit(in_channels, base_channel, A, residual=False)
         self.l2 = TCN_GCN_unit(base_channel, base_channel, A)
         self.l3 = TCN_GCN_unit(base_channel, base_channel, A)
-        self.l4 = TCN_GCN_unit(base_channel, base_channel, A, )
-        self.l5 = TCN_GCN_unit(base_channel, base_channel * 2, A,  stride=2)
+        self.l4 = TCN_GCN_unit(base_channel, base_channel, A)
+        self.l5 = TCN_GCN_unit(base_channel, base_channel * 2, A, stride=2)
         self.l6 = TCN_GCN_unit(base_channel * 2, base_channel * 2, A)
         self.l7 = TCN_GCN_unit(base_channel * 2, base_channel * 2, A)
         self.l8 = TCN_GCN_unit(base_channel * 2, base_channel * 4, A, stride=2)
