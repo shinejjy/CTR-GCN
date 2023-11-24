@@ -425,8 +425,6 @@ class Stage1(nn.Module):
         self.layer3 = nn.Linear(625, 36)
         self.c_dim = c_dim
         self.beta = nn.Parameter(torch.zeros(1))
-        self.conv = nn.Conv2d(1, 1, kernel_size=1)
-        self.relu = nn.ReLU(inplace=True)
 
     def forward(self):
         device = self.spd_A.device

@@ -220,13 +220,9 @@ class unit_spd(nn.Module):
             BiMap(1, 1, 10 * 10, 25),
             LogEig()
         )
-        self.conv = nn.Conv2d(1, 1, kernel_size=1)
-        self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
         x = self.spd_net(x)
-        x = self.relu(self.conv(x))
-
         return x
 
 
@@ -521,20 +517,27 @@ class Stage1(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(6, 6, kernel_size=5),
             nn.ReLU(inplace=True),
-        ).cuda()
+        )
         self.spdn = unit_spd()
         self.layer3 = nn.Linear(625, 36)
         self.beta = nn.Parameter(torch.zeros(1))
         self.c_dim = c_dim
+        self.conv = nn.Conv2d(1, 1, kernel_size=1)
+        self.relu = nn.ReLU(inplace=True)
 
     def forward(self):
-        spd_A = self.spd_A.view(1, 6, 25, 25).cuda()
-        spd_A = self.pre_spd_conv(spd_A).view(6, self.c_dim ** 2).cpu().detach().numpy()
+        device = self.spd_A.device
+        self.spdn = self.spdn.to('cpu')
+        spd_A = self.spd_A.view(1, 6, 25, 25)
+        spd_A = self.pre_spd_conv(spd_A).view(6, self.c_dim ** 2).detach().cpu().numpy()
         spd_A = np.cov(spd_A, rowvar=False)
         spd_A = torch.from_numpy(spd_A).to(torch.float32).view(1, 1, self.c_dim ** 2, self.c_dim ** 2)
         spd_A = self.spdn(spd_A).view(1, 25, 25)
+        spd_A = spd_A.to(device)
+        self.spdn = self.spdn.to(device)
+        spd_A = self.relu(self.conv(spd_A))
 
-        return (self.beta * spd_A).cuda()
+        return self.beta * spd_A
 
 
 class Stage2(nn.Module):

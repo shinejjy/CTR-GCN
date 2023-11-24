@@ -264,10 +264,10 @@ class Processor():
         self.best_acc = 0
         self.best_acc_epoch = 0
 
-        if self.arg.spd == 1:
-            self.model.stage2 = self.model.stage2.cuda(self.output_device)
-        else:
-            self.model = self.model.cuda(self.output_device)
+        # if self.arg.spd == 1:
+        #     self.model.stage2 = self.model.stage2.cuda(self.output_device)
+        # else:
+        self.model = self.model.cuda(self.output_device)
 
         self.multi_gpu = False
         if type(self.arg.device) is list:
@@ -566,9 +566,9 @@ class Processor():
 
                 self.train(epoch, save_model=save_model)
 
-                if self.multi_gpu:
-                    device = self.model.module.stage1.spd_A.device
-                    self.model.module.stage1.spdn = self.model.module.stage1.spdn.to(device)
+                # if self.multi_gpu:
+                #     device = self.model.module.stage1.spd_A.device
+                #     self.model.module.stage1.spdn = self.model.module.stage1.spdn.to(device)
 
                 self.eval(epoch, save_score=self.arg.save_score, loader_name=['test'])
 

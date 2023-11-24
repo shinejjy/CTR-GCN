@@ -213,8 +213,33 @@ class unit_tcn(nn.Module):
         return x
 
 
+class ViewMixAttention(nn.Module):
+    def __init__(self, out_channels):
+        super(ViewMixAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool1d(1)
+        self.relu = nn.ReLU()
+        self.soft = nn.Softmax(-1)
+        # self.bn = nn.BatchNorm2d(out_channels)
+        self.linear = nn.Linear(625, 625)
+        #        self.linear2 = nn.Linear(25,25)
+        self.out_channels = out_channels
+
+    def forward(self, x):
+        N, C, VV = x.size()
+        x1 = x[:, :C // 2, :]
+        x2 = x[:, C // 2:C, :]
+        Q_o = Q_Spa_Trans = self.avg_pool(x1.permute(0, 2, 1).contiguous())
+        K_o = K_Spa_Trans = self.avg_pool(x2.permute(0, 2, 1).contiguous())
+        Q_Spa_Trans = self.relu(self.linear(Q_Spa_Trans.squeeze(-1)))
+        K_Spa_Trans = self.relu(self.linear(K_Spa_Trans.squeeze(-1)))
+        Spa_atten = self.soft(torch.einsum('nv,nw->nvw', (Q_Spa_Trans, K_Spa_Trans))).unsqueeze(1).repeat(1,
+                                                                                                          self.out_channels,
+                                                                                                          1, 1)
+        return Spa_atten, Q_o, K_o
+
+
 class unit_gcn(nn.Module):
-    def __init__(self, in_channels, out_channels, A, coff_embedding=4, residual=True, ave=8):
+    def __init__(self, in_channels, out_channels, A, coff_embedding=4, residual=True, ave=4):
         super(unit_gcn, self).__init__()
         # (4, 3, 64, 25)
         inter_channels = out_channels // coff_embedding
@@ -242,10 +267,16 @@ class unit_gcn(nn.Module):
             self.down = lambda x: 0
 
         self.A = nn.Parameter(torch.from_numpy(A.astype(np.float32)))
+        self.A_SE = Variable(torch.from_numpy(A.astype(np.float32)), requires_grad=False)
         self.alpha = nn.Parameter(torch.zeros(1))
+        self.gamma = nn.Parameter(torch.zeros(1))
         self.bn = nn.BatchNorm2d(out_channels)
+        self.Mix_Att = ViewMixAttention(out_channels // 2)
         self.soft = nn.Softmax(-2)
         self.relu = nn.ReLU(inplace=True)
+        self.soft = nn.Softmax(-1)
+        self.linear = nn.Linear(625, 625)
+
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -254,16 +285,15 @@ class unit_gcn(nn.Module):
                 bn_init(m, 1)
         bn_init(self.bn, 1e-6)
 
-        self.ave = ave
-        self.attention1 = MultiHeadSelfAttention(dim_in=self.ave, dim_k=self.ave // 2, dim_v=self.ave, num_heads=2)
-
-        self.adja_emb = nn.Conv2d(out_channels * 6, self.ave, kernel_size=1)
-        self.conv2 = nn.Conv2d(self.ave, out_channels * 6, kernel_size=1)
-
-    def forward(self, x, A_spd, pos_emb):
+    def forward(self, x, pos_emb, A_spd=None):
         # (4, 3, 64, 25)
         y = None
-        A = self.A.cuda(x.get_device()) + A_spd
+        if A_spd:
+            A = self.A.cuda(x.get_device()) + A_spd
+        else:
+            A = self.A.cuda(x.get_device())
+
+        A_se = self.A_SE.cuda(x.get_device())
 
         A_at = []
         # 直接相加？
@@ -272,17 +302,22 @@ class unit_gcn(nn.Module):
 
         A_at = torch.stack(A_at, 0)
         VI, N, C, V, V = A_at.shape
-        A_at2 = self.adja_emb(A_at.view(N, C * VI, V, V))
-        _, C_em, _, _ = A_at2.shape
-        A_at2 = A_at2.view(N, V * V, C_em)
-        # x2 = self.conv1(x1.view(VI * N, C, V, V)).view(VI * N, V * V)
+        m = A_at.view(N, VI, C, V * V)
+        attens = torch.zeros([N, VI, V*V, V*V], dtype=torch.float32, device=x.get_device()).detach()
+        for i in range(VI):
+            m1, Q1, K1 = self.Mix_Att(m[:, i, :C // 2, :])
+            m2, Q2, K2 = self.Mix_Att(m[:, i, C // 2:(C // 2) * 2, :])
+            m1_2 = self.soft(torch.einsum('nv,nw->nvw', (self.relu(self.linear(K1.squeeze(-1))), self.relu(
+                self.linear(Q2.squeeze(-1)))))).unsqueeze(1).repeat(1, self.out_c // 2, 1, 1)
 
-        A_at2 = self.attention1(A_at2 + pos_emb).view(N, C_em, V, V)
+            m1 = m1 / 2 + m1_2 / 4
+            m2 = m2 / 2 + m1_2 / 4
+            atten = torch.cat([m1, m2], dim=1)
+            attens[:, i, :, :] = atten
 
-        # x2 = x2.unsqueeze(-3).repeat(1, 1, C, 1, 1)
-        A_at2 = self.conv2(A_at2).view(N, VI, C, V, V)
-        A_at2 = A_at2.permute(1, 0, 2, 3, 4)  # VI, N, C, V, V
-        A_fn = A_at + A_at2
+        m = torch.einsum('nkvw,nkcv->nkcw', attens, m + pos_emb)
+        A_at = A_at + m.view(VI, N, C, V, V)
+        A_fn = A_at + self.gamma * A_se.unsqueeze(1).unsqueeze(1)
 
         for i in range(self.num_subset):
             z = self.convs2[i](x, A_fn[i])
@@ -377,34 +412,34 @@ class unit_spd(nn.Module):
 
 
 class Stage1(nn.Module):
-    def __init__(self, graph, c_dim=21, view_dim_emb=12):
+    def __init__(self, graph, c_dim=21):
         super(Stage1, self).__init__()
-        # view_embedding_dimensions
-        self.view_dim_emb = view_dim_emb
-
         self.spd_A = nn.Parameter(torch.from_numpy(graph.spd_A.astype(np.float32)))
-
-        # pre_spd
+        # self.pre_spd_conv = nn.Conv2d(6, 6, kernel_size=3, stride=2, padding=3)
         self.pre_spd_conv = nn.Sequential(
-            nn.Conv2d(6, self.view_dim_emb, kernel_size=5),
+            nn.Conv2d(6, 6, kernel_size=5),
             nn.ReLU(inplace=True),
-            nn.Conv2d(self.view_dim_emb, self.view_dim_emb, kernel_size=5),
+            nn.Conv2d(6, 6, kernel_size=5),
             nn.ReLU(inplace=True),
         )
-        self.beta = nn.Parameter(torch.zeros(1))
-        # SPD net
         self.spdn = unit_spd([17 * 17, 100, 25])
+        self.layer3 = nn.Linear(625, 36)
+        self.beta = nn.Parameter(torch.zeros(1))
         self.c_dim = c_dim
+        self.conv = nn.Conv2d(1, 1, kernel_size=1)
+        self.relu = nn.ReLU(inplace=True)
 
     def forward(self):
         device = self.spd_A.device
         self.spdn = self.spdn.to('cpu')
         spd_A = self.spd_A.view(1, 6, 25, 25)
-        spd_A = self.pre_spd_conv(spd_A).view(self.view_dim_emb, self.c_dim ** 2).detach().cpu().numpy()
+        spd_A = self.pre_spd_conv(spd_A).view(6, self.c_dim ** 2).detach().cpu().numpy()
         spd_A = np.cov(spd_A, rowvar=False)
         spd_A = torch.from_numpy(spd_A).to(torch.float32).view(1, 1, self.c_dim ** 2, self.c_dim ** 2)
         spd_A = self.spdn(spd_A).view(1, 25, 25)
         spd_A = spd_A.to(device)
+        self.spdn = self.spdn.to(device)
+        spd_A = self.relu(self.conv(spd_A))
 
         return self.beta * spd_A
 
@@ -456,7 +491,7 @@ class Stage2(nn.Module):
 
         self.pos_embedding = nn.Parameter(torch.randn(1, self.num_point ** 2, ave))
 
-    def forward(self, x, spd_A):
+    def forward(self, x, spd_A=None):
         """
             N 视频个数(batch_size)
             C = 3 (X,Y,Z)代表一个点的信息(位置)
@@ -479,18 +514,18 @@ class Stage2(nn.Module):
 
         pos_emb = self.pos_embedding
 
-        x = self.l1(x, spd_A, pos_emb)  # (N*M, 64, 64, 25)
-        x = self.l2(x, spd_A, pos_emb)  # (N*M, 64, 64, 25)
-        x = self.l3(x, spd_A, pos_emb)  # (N*M, 64, 64, 25)
-        x = self.l4(x, spd_A, pos_emb)  # (N*M, 64, 64, 25)
+        x = self.l1(x, pos_emb, spd_A)  # (N*M, 64, 64, 25)
+        x = self.l2(x, pos_emb, spd_A)  # (N*M, 64, 64, 25)
+        x = self.l3(x, pos_emb, spd_A)  # (N*M, 64, 64, 25)
+        x = self.l4(x, pos_emb, spd_A)  # (N*M, 64, 64, 25)
         x2 = x
-        x = self.l5(x, spd_A, pos_emb)  # (N*M, 128, 32, 25)
-        x = self.l6(x, spd_A, pos_emb)  # (N*M, 128, 32, 25)
-        x = self.l7(x, spd_A, pos_emb)  # (N*M, 128, 32, 25)
+        x = self.l5(x, pos_emb, spd_A)  # (N*M, 128, 32, 25)
+        x = self.l6(x, pos_emb, spd_A)  # (N*M, 128, 32, 25)
+        x = self.l7(x, pos_emb, spd_A)  # (N*M, 128, 32, 25)
         x3 = x
-        x = self.l8(x, spd_A, pos_emb)  # (N*M, 256, 16, 25)
-        x = self.l9(x, spd_A, pos_emb)  # (N*M, 256, 16, 25)
-        x = self.l10(x, spd_A, pos_emb)  # (N*M, 256, 16, 25)
+        x = self.l8(x, pos_emb, spd_A)  # (N*M, 256, 16, 25)
+        x = self.l9(x, pos_emb, spd_A)  # (N*M, 256, 16, 25)
+        x = self.l10(x, pos_emb, spd_A)  # (N*M, 256, 16, 25)
 
         x2 = self.first_tram(x2)
         x3 = self.second_tram(x3)
@@ -516,10 +551,10 @@ class Model(nn.Module):
             Graph = import_class(graph)
             self.graph = Graph(**graph_args)
 
-        self.stage1 = Stage1(self.graph, c_dim=17)
+        # self.stage1 = Stage1(self.graph, c_dim=17)
         self.stage2 = Stage2(num_class, num_point, num_person, self.graph, in_channels, drop_out)
 
     def forward(self, x):
-        spd_A = self.stage1().cuda(x.get_device())
-        x = self.stage2(x, spd_A)
+        # spd_A = self.stage1().cuda(x.get_device())
+        x = self.stage2(x)
         return x
