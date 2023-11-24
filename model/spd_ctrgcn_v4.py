@@ -430,7 +430,6 @@ class Stage1(nn.Module):
             nn.ReLU(inplace=True),
         )
         self.spdn = unit_spd()
-        self.layer3 = nn.Linear(625, 36)
         self.beta = nn.Parameter(torch.zeros(1))
         self.c_dim = c_dim
         self.conv = nn.Conv2d(1, 1, kernel_size=1)
