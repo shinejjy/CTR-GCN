@@ -273,6 +273,16 @@ class unit_gcn(nn.Module):
     def __init__(self, in_channels, out_channels, A, coff_embedding=4, residual=True, num_point=25):
         super(unit_gcn, self).__init__()
         # (4, 3, 64, 25)
+
+        rel_reduction = 8
+        mid_reduction = 1
+        if in_channels == 3 or in_channels == 9:
+            self.rel_channels = 8
+            self.mid_channels = 16
+        else:
+            self.rel_channels = in_channels // rel_reduction
+            self.mid_channels = in_channels // mid_reduction
+
         inter_channels = out_channels // coff_embedding
         self.inter_c = inter_channels
         self.out_c = out_channels
@@ -298,18 +308,14 @@ class unit_gcn(nn.Module):
             self.down = lambda x: 0
 
         self.A = nn.Parameter(torch.from_numpy(A.astype(np.float32)))
-        self.A_SE = Variable(torch.from_numpy(A.astype(np.float32)), requires_grad=False)
+        # self.A_SE = Variable(torch.from_numpy(A.astype(np.float32)), requires_grad=False)
         self.alpha = nn.Parameter(torch.zeros(1))
-        self.gamma = nn.Parameter(torch.zeros(1))
+        # self.gamma = nn.Parameter(torch.zeros(1))
         self.bn = nn.BatchNorm2d(out_channels)
         self.soft = nn.Softmax(-2)
         self.relu = nn.ReLU(inplace=True)
 
-        self.attention = MultiHeadSelfAttention(36, 36, 36, 6)
-        self.group = 5
-        self.layer1 = nn.Linear(num_point ** 2 // self.group, 36)
-        self.layer2 = nn.Linear(36, num_point ** 2 // self.group)
-        self.conv = nn.Conv2d(1, out_channels, kernel_size=1)
+        self.conv = nn.Conv2d(self.num_subset, self.num_subset * self.out_c, kernel_size=1)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -318,40 +324,25 @@ class unit_gcn(nn.Module):
                 bn_init(m, 1)
         bn_init(self.bn, 1e-6)
 
-    def forward(self, x, A_spd, pos_emb):
+    def forward(self, x, A_spd):
         # (4, 3, 64, 25)
+        N, C, T, V = x.shape
         y = None
         A = self.A.cuda(x.get_device())
         A = A + A_spd
-        A_se = self.A_SE.cuda(x.get_device())
+        # A_se = self.A_SE.cuda(x.get_device())
 
-        A_at = []
+        A_sub = torch.zeros((N, self.num_subset, self.out_c, V, V), device=x.get_device())
         # 直接相加？
         for i in range(self.num_subset):
-            A_at.append(self.convs1[i](x, A[i], self.alpha))
+            A_sub[:, i, :, :, :] = self.convs1[i](x, A[i], self.alpha)
+        A_sub = A_sub.view(N, self.num_subset, self.out_c, V, V)
 
-        A_at = torch.stack(A_at, 0)
-        VI, N, C, V, V = A_at.shape
-        A_at2 = A_at.permute(1, 0, 2, 3, 4).mean(-3).view(VI * N, V * V)
-
-        A_at_group = torch.zeros_like(A_at2)
-        for i in range(self.group):
-            A_at_part = self.relu(self.layer1(A_at2[:, (V * V // self.group) * i: (V * V // self.group) * (i + 1)])).view(N, VI, 36)
-            A_at_part = A_at_part + self.attention(A_at_part + pos_emb)
-            A_at_part = self.layer2(A_at_part.view(VI * N, 36))
-            A_at_group[:, (V * V // self.group) * i: (V * V // self.group) * (i + 1)] = A_at_part
-
-        A_at_group = A_at_group.view(N * VI, V, V)
-        A_at_group = self.relu(A_at_group)
-
-        A_at_group = self.conv(A_at_group.unsqueeze(-3)).view(N, VI, C, V, V)
-        A_at_group = A_at_group.permute(1, 0, 2, 3, 4)  # VI, N, C, V, V
-        A_at = A_at + A_at_group
-
-        A_fn = A_at + self.gamma * A_se.unsqueeze(1).unsqueeze(1)
+        A_sub = A_sub + self.conv(A_sub.mean(2).view(N, self.num_subset, V, V)).view(N, self.num_subset, self.out_c, V, V)
+        A_sub = A_sub.view(self.num_subset, N, self.out_c, V, V)
 
         for i in range(self.num_subset):
-            z = self.convs2[i](x, A_fn[i])
+            z = self.convs2[i](x, A_sub[i])
             y = z + y if y is not None else z
 
         y = self.bn(y)
@@ -380,9 +371,9 @@ class TCN_GCN_unit(nn.Module):
         else:
             self.residual = unit_tcn(in_channels, out_channels, kernel_size=1, stride=stride)
 
-    def forward(self, x, spd_A, pos_emb):
+    def forward(self, x, spd_A):
         # (4, 3, 64, 25)
-        y = self.relu(self.tcn1(self.gcn1(x, spd_A, pos_emb)) + self.residual(x))
+        y = self.relu(self.tcn1(self.gcn1(x, spd_A)) + self.residual(x))
         return y
 
 
@@ -437,7 +428,7 @@ class Stage1(nn.Module):
         spd_A = torch.from_numpy(spd_A).to(torch.float32).view(1, 1, self.c_dim ** 2, self.c_dim ** 2)
         spd_A = self.spdn(spd_A).view(1, self.num_point, self.num_point)
         spd_A = spd_A.to(device)
-        self.spdn = self.spdn.to(device)
+        # self.spdn = self.spdn.to(device)
         spd_A = self.relu(self.conv(spd_A))
 
         return self.beta * spd_A
@@ -489,10 +480,7 @@ class Stage2(nn.Module):
                 nn.ReLU()
             )
 
-        self.pos_embedding = nn.Parameter(torch.randn(1, 6, 36))
-
     def forward(self, x, spd_A):
-        pos_emb = self.pos_embedding
         """
             N 视频个数(batch_size)
             C = 3 (X,Y,S)代表一个点的信息(位置+预测的可能性)
@@ -513,18 +501,18 @@ class Stage2(nn.Module):
         x = x.view(N, M, V, C, T).permute(0, 1, 3, 4, 2).contiguous().view(N * M, C, T, V)
         # N MVC T -> N M V C T -> N M C T V -> NM C T V
 
-        x = self.l1(x, spd_A, pos_emb)  # (N*M, 64, 64, 25)
-        x = self.l2(x, spd_A, pos_emb)  # (N*M, 64, 64, 25)
-        x = self.l3(x, spd_A, pos_emb)  # (N*M, 64, 64, 25)
-        x = self.l4(x, spd_A, pos_emb)  # (N*M, 64, 64, 25)
+        x = self.l1(x, spd_A)  # (N*M, 64, 64, 25)
+        x = self.l2(x, spd_A)  # (N*M, 64, 64, 25)
+        x = self.l3(x, spd_A)  # (N*M, 64, 64, 25)
+        x = self.l4(x, spd_A)  # (N*M, 64, 64, 25)
         x2 = x
-        x = self.l5(x, spd_A, pos_emb)  # (N*M, 128, 32, 25)
-        x = self.l6(x, spd_A, pos_emb)  # (N*M, 128, 32, 25)
-        x = self.l7(x, spd_A, pos_emb)  # (N*M, 128, 32, 25)
+        x = self.l5(x, spd_A)  # (N*M, 128, 32, 25)
+        x = self.l6(x, spd_A)  # (N*M, 128, 32, 25)
+        x = self.l7(x, spd_A)  # (N*M, 128, 32, 25)
         x3 = x
-        x = self.l8(x, spd_A, pos_emb)  # (N*M, 256, 16, 25)
-        x = self.l9(x, spd_A, pos_emb)  # (N*M, 256, 16, 25)
-        x = self.l10(x, spd_A, pos_emb)  # (N*M, 256, 16, 25)
+        x = self.l8(x, spd_A)  # (N*M, 256, 16, 25)
+        x = self.l9(x, spd_A)  # (N*M, 256, 16, 25)
+        x = self.l10(x, spd_A)  # (N*M, 256, 16, 25)
 
         x2 = self.first_tram(x2)
         x3 = self.second_tram(x3)
