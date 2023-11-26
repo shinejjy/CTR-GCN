@@ -444,7 +444,7 @@ class Stage1(nn.Module):
         spd_A = torch.from_numpy(spd_A).to(torch.float32).view(1, 1, self.c_dim ** 2, self.c_dim ** 2)
         spd_A = self.spdn(spd_A).view(1, 25, 25)
         spd_A = spd_A.to(device)
-        self.spdn = self.spdn.to(device)
+        # self.spdn = self.spdn.to(device)
         spd_A = self.relu(self.conv(spd_A))
 
         return self.beta * spd_A

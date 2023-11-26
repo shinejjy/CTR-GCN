@@ -91,40 +91,9 @@ class Graph:
 class MyGraph:
     def __init__(self, labeling_mode='spatial'):
         self.num_node = num_node
-        self.self_link = self_link
-        self.edge = edge
 
-        # self.left_arm = left_arm_part
-        # self.right_arm = right_arm_part
-        # self.head = head_part
-        # self.body = body_part
-        # self.left_leg = left_leg_part
-        # self.right_leg = right_leg_part
-
-        self.partition_body = partition_body
-        self.hop_dis = tools.get_hop_distance(
-            self.num_node, self.edge, max_hop=1)
-        self.A = self.get_adjacency_matrix(labeling_mode)
-        # self.new_A = self.get_adjacency_matrix_new(labeling_mode)
+        self.A = self.get_adjacency_matrix_new(labeling_mode)
         self.spd_A = copy.deepcopy(self.A)
-        # self.new_spd_A = copy.deepcopy(self.new_A)
-
-    def get_adjacency_matrix(self, labeling_mode=None):
-        if labeling_mode is None:
-            return self.A
-        if labeling_mode == 'spatial':
-            adjacency_matrix = tools.get_spatial_graph_new(num_node, edge)
-            A = np.zeros((6, 25, 25))
-
-            for hop in range(2):
-                for i in range(self.num_node):
-                    for j in range(self.num_node):
-                        if self.hop_dis[j, i] == hop:
-                            part_indices = tools.get_part_index(self.partition_body, j)
-                            A[part_indices, i, j] += adjacency_matrix[i, j]
-        else:
-            raise ValueError()
-        return A
 
     def get_adjacency_matrix_new(self, labeling_mode=None):
         if labeling_mode is None:
@@ -139,4 +108,4 @@ class MyGraph:
 
 if __name__ == '__main__':
     graph = MyGraph()
-    print(graph.new_A)
+    print(graph.A)

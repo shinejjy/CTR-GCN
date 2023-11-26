@@ -338,7 +338,7 @@ class unit_gcn(nn.Module):
             A_sub[:, i, :, :, :] = self.convs1[i](x, A[i], self.alpha)
         A_sub = A_sub.view(N, self.num_subset, self.out_c, V, V)
 
-        A_sub = A_sub + self.conv(A_sub.mean(2).view(N, self.num_subset, V, V)).view(N, self.num_subset, self.out_c, V, V)
+        A_sub = A_sub + self.relu(self.conv(A_sub.mean(2).view(N, self.num_subset, V, V)).view(N, self.num_subset, self.out_c, V, V))
         A_sub = A_sub.view(self.num_subset, N, self.out_c, V, V)
 
         for i in range(self.num_subset):
