@@ -119,7 +119,6 @@ def get_hop_distance(num_node, edge, max_hop=1):
 
 
 def get_part_index(partition_body, v):
-    for part in partition_body:
-        part_indices = np.where(np.isin(part, v))
-        if len(part_indices[0]) > 0:
-            return part_indices[0][0]  # 返回找到的第一个部分的索引
+    for idx, part in enumerate(partition_body):
+        if v in part:
+            return idx

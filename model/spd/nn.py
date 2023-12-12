@@ -1,10 +1,43 @@
+import torch
 import torch as th
 import torch.nn as nn
-from torch.autograd import Function as F
+# from torch.autograd import Function as F
 from . import functional
+from torch.nn import functional as F
 
-dtype=th.float32
-device=th.device('cpu')
+dtype = th.float32
+device = th.device('cpu')
+
+
+class SPDCov2d(nn.Module):
+    # 只需要训练V，直接pytorch优化即可
+    def __init__(self, in_channel, out_channel, kernel_size, stride=1, padding=0):
+        super(SPDCov2d, self).__init__()
+        self.V = nn.Parameter(torch.randn((out_channel, in_channel, kernel_size, kernel_size),
+                                          dtype=torch.float32), requires_grad=True)
+        self.stride = stride
+        self.padding = padding
+        self.in_channel = in_channel
+        self.out_channel = out_channel
+        self.kernel_size = kernel_size
+
+    def forward(self, x):
+        V = self.V
+        V_T = torch.einsum('oiuv->oivu', V)
+        W = torch.einsum('oiuv, oivw -> oiuw', V_T, V) + 1e-3 * torch.eye(self.kernel_size)  # 构建SPD
+        x = F.conv2d(x, W, stride=self.stride, padding=self.padding)
+        return x
+
+
+class DiagonalizingLayer(nn.Module):
+    def __init__(self):
+        super(DiagonalizingLayer, self).__init__()
+
+    def forward(self, x):
+        x = torch.cosh(x).view(x.shape[0], -1)
+        x = torch.cosh(x).view(x.shape[0], -1)
+        x = torch.stack([torch.diag(xi) for xi in x])
+        return x
 
 
 class BiMap(nn.Module):
@@ -13,40 +46,50 @@ class BiMap(nn.Module):
     Output P: (batch_size,ho) of bilinearly mapped matrices of size (no,no)
     Stiefel parameter of size (ho,hi,ni,no)
     """
-    def __init__(self,ho,hi,ni,no):
+
+    def __init__(self, ho, hi, ni, no):
         super(BiMap, self).__init__()
-        self._W=functional.StiefelParameter(th.empty(ho,hi,ni,no,dtype=dtype,device=device))
-        self._ho=ho; self._hi=hi; self._ni=ni; self._no=no
+        self._W = functional.StiefelParameter(th.empty(ho, hi, ni, no, dtype=dtype, device=device))
+        self._ho = ho;
+        self._hi = hi;
+        self._ni = ni;
+        self._no = no
         functional.init_bimap_parameter(self._W)
 
-
-    def forward(self,X):
+    def forward(self, X):
         self._W = self._W.to('cpu')
-        return functional.bimap_channels(X,self._W)
+        return functional.bimap_channels(X, self._W)
+
 
 class LogEig(nn.Module):
     """
     Input P: (batch_size,h) SPD matrices of size (n,n)
     Output X: (batch_size,h) of log eigenvalues matrices of size (n,n)
     """
-    def forward(self,P):
+
+    def forward(self, P):
         return functional.LogEig.apply(P)
+
 
 class SqmEig(nn.Module):
     """
     Input P: (batch_size,h) SPD matrices of size (n,n)
     Output X: (batch_size,h) of sqrt eigenvalues matrices of size (n,n)
     """
-    def forward(self,P):
+
+    def forward(self, P):
         return functional.SqmEig.apply(P)
+
 
 class ReEig(nn.Module):
     """
     Input P: (batch_size,h) SPD matrices of size (n,n)
     Output X: (batch_size,h) of rectified eigenvalues matrices of size (n,n)
     """
-    def forward(self,P):
+
+    def forward(self, P):
         return functional.ReEig.apply(P)
+
 
 class BaryGeom(nn.Module):
     '''
@@ -54,8 +97,10 @@ class BaryGeom(nn.Module):
     Input x is a batch of SPD matrices (batch_size,1,n,n) to average
     Output is (n,n) Riemannian mean
     '''
-    def forward(self,x):
+
+    def forward(self, x):
         return functional.BaryGeom(x)
+
 
 class BatchNormSPD(nn.Module):
     """
@@ -63,55 +108,66 @@ class BatchNormSPD(nn.Module):
     Output P: (N,h) batch-normalized matrices
     SPD parameter of size (n,n)
     """
-    def __init__(self,n):
-        super(__class__,self).__init__()
-        self.momentum=0.1
-        self.running_mean=th.eye(n,dtype=dtype) ################################
+
+    def __init__(self, n):
+        super(__class__, self).__init__()
+        self.momentum = 0.1
+        self.running_mean = th.eye(n, dtype=dtype)  ################################
         # self.running_mean=nn.Parameter(th.eye(n,dtype=dtype),requires_grad=False)
-        self.weight=functional.SPDParameter(th.eye(n,dtype=dtype))
-    def forward(self,X):
-        N,h,n,n=X.shape
-        X_batched=X.permute(2,3,0,1).contiguous().view(n,n,N*h,1).permute(2,3,0,1).contiguous()
-        if(self.training):
-            mean=functional.BaryGeom(X_batched)
+        self.weight = functional.SPDParameter(th.eye(n, dtype=dtype))
+
+    def forward(self, X):
+        N, h, n, n = X.shape
+        X_batched = X.permute(2, 3, 0, 1).contiguous().view(n, n, N * h, 1).permute(2, 3, 0, 1).contiguous()
+        if (self.training):
+            mean = functional.BaryGeom(X_batched)
             with th.no_grad():
-                self.running_mean.data=functional.geodesic(self.running_mean,mean,self.momentum)
-            X_centered=functional.CongrG(X_batched,mean,'neg')
+                self.running_mean.data = functional.geodesic(self.running_mean, mean, self.momentum)
+            X_centered = functional.CongrG(X_batched, mean, 'neg')
         else:
-            X_centered=functional.CongrG(X_batched,self.running_mean,'neg')
-        X_normalized=functional.CongrG(X_centered,self.weight,'pos')
-        return X_normalized.permute(2,3,0,1).contiguous().view(n,n,N,h).permute(2,3,0,1).contiguous()
+            X_centered = functional.CongrG(X_batched, self.running_mean, 'neg')
+        X_normalized = functional.CongrG(X_centered, self.weight, 'pos')
+        return X_normalized.permute(2, 3, 0, 1).contiguous().view(n, n, N, h).permute(2, 3, 0, 1).contiguous()
+
 
 class CovPool(nn.Module):
     """
     Input f: Temporal n-dimensionnal feature map of length T (T=1 for a unitary signal) (batch_size,n,T)
     Output X: Covariance matrix of size (batch_size,1,n,n)
     """
-    def __init__(self,reg_mode='mle'):
-        super(__class__,self).__init__()
-        self._reg_mode=reg_mode
-    def forward(self,f):
-        return functional.cov_pool(f,self._reg_mode)
+
+    def __init__(self, reg_mode='mle'):
+        super(__class__, self).__init__()
+        self._reg_mode = reg_mode
+
+    def forward(self, f):
+        return functional.cov_pool(f, self._reg_mode)
+
 
 class CovPoolBlock(nn.Module):
     """
     Input f: L blocks of temporal n-dimensionnal feature map of length T (T=1 for a unitary signal) (batch_size,L,n,T)
     Output X: L covariance matrices, shape (batch_size,L,1,n,n)
     """
-    def __init__(self,reg_mode='mle'):
-        super(__class__,self).__init__()
-        self._reg_mode=reg_mode
-    def forward(self,f):
-        ff=[functional.cov_pool(f[:,i,:,:],self._reg_mode)[:,None,:,:,:] for i in range(f.shape[1])]
-        return th.cat(ff,1)
+
+    def __init__(self, reg_mode='mle'):
+        super(__class__, self).__init__()
+        self._reg_mode = reg_mode
+
+    def forward(self, f):
+        ff = [functional.cov_pool(f[:, i, :, :], self._reg_mode)[:, None, :, :, :] for i in range(f.shape[1])]
+        return th.cat(ff, 1)
+
 
 class CovPoolMean(nn.Module):
     """
     Input f: Temporal n-dimensionnal feature map of length T (T=1 for a unitary signal) (batch_size,n,T)
     Output X: Covariance matrix of size (batch_size,1,n,n)
     """
-    def __init__(self,reg_mode='mle'):
-        super(__class__,self).__init__()
-        self._reg_mode=reg_mode
-    def forward(self,f):
-        return functional.cov_pool_mu(f,self._reg_mode)
+
+    def __init__(self, reg_mode='mle'):
+        super(__class__, self).__init__()
+        self._reg_mode = reg_mode
+
+    def forward(self, f):
+        return functional.cov_pool_mu(f, self._reg_mode)

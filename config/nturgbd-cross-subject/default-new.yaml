@@ -31,7 +31,7 @@ model_args:
   num_class: 60
   num_point: 25
   num_person: 2
-  graph: graph.ntu_rgb_d_o.MyGraph
+  graph: graph.ntu_rgb_d.MyGraph
   graph_args:
     labeling_mode: 'spatial'
 
