@@ -5,7 +5,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
-from model.spd.nn import BiMap, LogEig, ReEig
+from model.spd.nn import BiMap, LogEig, SPDCov2d, DiagonalizingLayer, ReEig
+from sixv_model.sub_net.Attention import Cross_MultiAttention
 
 
 def import_class(name):
@@ -82,10 +83,10 @@ class MultiScale_TemporalConv(nn.Module):
                  residual_kernel_size=1):
 
         super().__init__()
-        assert out_channels % (len(dilations) + 2) == 0, '# out channels should be multiples of # branches'
+        assert out_channels % (len(dilations) + 3) == 0, '# out channels should be multiples of # branches'
 
         # Multiple branches of temporal convolution
-        self.num_branches = len(dilations) + 2
+        self.num_branches = len(dilations) + 3
         branch_channels = out_channels // self.num_branches
         if type(kernel_size) == list:
             assert len(kernel_size) == len(dilations)
@@ -125,6 +126,14 @@ class MultiScale_TemporalConv(nn.Module):
             nn.BatchNorm2d(branch_channels)
         ))
 
+        self.branches.append(nn.Sequential(
+            nn.Conv2d(in_channels, branch_channels, padding=0, kernel_size=1, stride=(stride, 1)),
+            nn.BatchNorm2d(branch_channels),
+            nn.ReLU(inplace=True),
+            Cross_MultiAttention(in_channels=branch_channels, emb_dim=branch_channels, num_heads=3),
+            nn.BatchNorm2d(branch_channels),
+        ))
+
         # Residual connection
         if not residual:
             self.residual = lambda x: 0
@@ -149,6 +158,45 @@ class MultiScale_TemporalConv(nn.Module):
         return out
 
 
+class Cross_Temporal_Spatial_Conv(nn.Module):
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 stride=1,
+                 residual=True,
+                 residual_kernel_size=1):
+
+        super().__init__()
+
+        self.cross_tem_spa = Cross_MultiAttention(in_channels=in_channels, emb_dim=in_channels, num_heads=3)
+
+        self.pro_out = nn.Conv2d(in_channels, out_channels, padding=0, kernel_size=1, stride=(stride, 1))
+
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+
+        # Residual connection
+        if not residual:
+            self.residual = lambda x: 0
+        elif (in_channels == out_channels) and (stride == 1):
+            self.residual = lambda x: x
+        else:
+            self.residual = TemporalConv(in_channels, out_channels, kernel_size=residual_kernel_size, stride=stride)
+
+        # initialize
+        self.apply(weights_init)
+
+    def forward(self, x):
+        # Input dim: (N,C,T,V)
+        res = self.residual(x)
+        x_j = x.mean(-2).permute(0, 2, 1)
+        x = self.cross_tem_spa(x, x_j)[0]
+        x = self.bn(x)
+        x = self.relu(x)
+        x = self.pro_out(x) + res
+        return x
+
+
 class CTRGC_1(nn.Module):
     def __init__(self, in_channels, out_channels, rel_reduction=8, mid_reduction=1):
         super(CTRGC_1, self).__init__()
@@ -170,13 +218,18 @@ class CTRGC_1(nn.Module):
             elif isinstance(m, nn.BatchNorm2d):
                 bn_init(m, 1)
 
-    def forward(self, x, A=None, alpha=1):
+    def forward(self, x, A3=None, A6=None, alpha=1, beta=1):
+
+        A6_ex = A6.view(1, 6, 25, 25).expand(self.out_channels // 6, -1, -1, -1)
+        A6_ex = A6_ex.contiguous().view(self.out_channels, 25, 25)
+
         # (4, 3, 64, 25)
         x1, x2 = self.conv1(x).mean(-2), self.conv2(x).mean(-2)
         # (4, 8, 25) (4, 8, 25) (4, 64, 64, 25)
         x1 = self.tanh(x1.unsqueeze(-1) - x2.unsqueeze(-2))
         # (4, 64, 25, 25)
-        x1 = self.conv4(x1) * alpha + (A.unsqueeze(0).unsqueeze(0) if A is not None else 0)  # N,C,V,V
+        x1 = self.conv4(x1) * alpha + (A3.unsqueeze(0).unsqueeze(0) if A3 is not None else 0) + A6_ex.unsqueeze(
+            0) * beta  # N,C,V,V
         # (4, 64, 25, 25) (1, 1, 25, 25)
         return x1
 
@@ -210,14 +263,13 @@ class CTRGC_2(nn.Module):
 class unit_spd(nn.Module):
     def __init__(self):
         super(unit_spd, self).__init__()
-        self.spd_net = nn.Sequential(
-            BiMap(1, 1, 17 * 17, 10 * 10),
-            ReEig(),
-            BiMap(1, 1, 10 * 10, 25),
-            LogEig()
-        )
+        self.bimap1 = BiMap(1, 1, 289, 100)
+        self.bimap2 = BiMap(1, 1, 100, 25)
+        self.logeig = LogEig()
 
     def forward(self, x):
+        x = torch.sinh(self.bimap1(x))
+        x = torch.sinh(self.bimap2(x))
         x = self.spd_net(x)
 
         return x
@@ -241,14 +293,14 @@ class unit_tcn(nn.Module):
 
 
 class unit_gcn(nn.Module):
-    def __init__(self, in_channels, out_channels, A, coff_embedding=4, residual=True):
+    def __init__(self, in_channels, out_channels, A3, A6, coff_embedding=4, residual=True):
         super(unit_gcn, self).__init__()
         # (4, 3, 64, 25)
         inter_channels = out_channels // coff_embedding
         self.inter_c = inter_channels
         self.out_c = out_channels
         self.in_c = in_channels
-        self.num_subset = A.shape[0]
+        self.num_subset = A3.shape[0]
         self.convs1 = nn.ModuleList()
         for i in range(self.num_subset):
             self.convs1.append(CTRGC_1(in_channels, out_channels))
@@ -268,10 +320,11 @@ class unit_gcn(nn.Module):
         else:
             self.down = lambda x: 0
 
-        self.A = nn.Parameter(torch.from_numpy(A.astype(np.float32)))
-        self.A_SE = Variable(torch.from_numpy(A.astype(np.float32)), requires_grad=False)
+        self.A3 = nn.Parameter(torch.from_numpy(A3.astype(np.float32)))
+        self.A6 = nn.Parameter(torch.from_numpy(A6.astype(np.float32)))
+        # self.A_SE = Variable(torch.from_numpy(A.astype(np.float32)), requires_grad=False)
         self.alpha = nn.Parameter(torch.zeros(1))
-        # self.gamma = nn.Parameter(torch.zeros(1))
+        self.beta = nn.Parameter(torch.zeros(1))
         self.bn = nn.BatchNorm2d(out_channels)
         self.soft = nn.Softmax(-2)
         self.relu = nn.ReLU(inplace=True)
@@ -283,61 +336,38 @@ class unit_gcn(nn.Module):
                 bn_init(m, 1)
         bn_init(self.bn, 1e-6)
 
-        self.attention = MultiHeadSelfAttention(36, 36, 36, 6)
-        self.layer1 = nn.Linear(625, 36)
-        self.relu2 = nn.ReLU(inplace=True)
-        self.layer2 = nn.Linear(36, 625)
-        self.relu3 = nn.ReLU(inplace=True)
-        self.conv = nn.Conv2d(1, out_channels, kernel_size=1)
-
-    def forward(self, x, A_spd):
+    def forward(self, x):
         # (4, 3, 64, 25)
         y = None
-        A = self.A.cuda(x.get_device())
+        A3 = self.A3.cuda(x.get_device())
+        A6 = self.A6.cuda(x.get_device())
         # A_se = self.A_SE.cuda(x.get_device())
 
         A_at = []
         # 直接相加？
         for i in range(self.num_subset):
-            A_at.append(self.convs1[i](x, A[i], self.alpha))
+            A_at.append(self.convs1[i](x, A3[i], A6, self.alpha, self.beta))
 
         A_at = torch.stack(A_at, 0)
-        VI, N, C, V, V = A_at.shape
-        A_at2 = A_at.permute(1, 0, 2, 3, 4).mean(-3).view(VI * N, V * V)
-        # x2 = self.conv1(x1.view(VI * N, C, V, V)).view(VI * N, V * V)
-        A_at2 = self.relu2(self.layer1(A_at2)).view(N, VI, 36)
-
-        A_at2 = A_at2 + self.attention(A_at2)
-        # A_at2 = A_at2 + self.layer_norm2(self.attention2(A_at2))
-
-        A_at2 = self.layer2(A_at2.view(VI * N, 36)).view(N * VI, V, V)
-        A_at2 = self.relu3(A_at2)
-        # x2 = x2.unsqueeze(-3).repeat(1, 1, C, 1, 1)
-        A_at2 = self.conv(A_at2.unsqueeze(-3)).view(N, VI, C, V, V)
-        A_at2 = A_at2.permute(1, 0, 2, 3, 4)  # VI, N, C, V, V
-        A_at = A_at + A_at2
-
-        beta = 0.01
-
-        A_fn = A_at + beta * A_spd.unsqueeze(1).unsqueeze(1)
 
         for i in range(self.num_subset):
-            z = self.convs2[i](x, A_fn[i])
+            z = self.convs2[i](x, A_at[i])
             y = z + y if y is not None else z
 
         y = self.bn(y)
         y += self.down(x)
         y = self.relu(y)
 
-        return y, A_spd.detach(), A.detach(), A_fn[:, 0, 0, :, :].squeeze(1).squeeze(1).detach(), self.alpha.detach()
+        return y, A3.detach(), A6.detach(), A_at[:, 0, 0, :, :].squeeze(1).squeeze(
+            1).detach(), self.alpha.detach(), self.beta.detach()
 
 
 class TCN_GCN_unit(nn.Module):
-    def __init__(self, in_channels, out_channels, A, stride=1, residual=True, kernel_size=5,
+    def __init__(self, in_channels, out_channels, A3, A6, stride=1, residual=True, kernel_size=5,
                  dilations=[1, 2]):
         super(TCN_GCN_unit, self).__init__()
         # (4, 3, 64, 25) , out=64
-        self.gcn1 = unit_gcn(in_channels, out_channels, A)
+        self.gcn1 = unit_gcn(in_channels, out_channels, A3, A6)
         self.tcn1 = MultiScale_TemporalConv(out_channels, out_channels, kernel_size=kernel_size, stride=stride,
                                             dilations=dilations,
                                             residual=False)
@@ -351,52 +381,11 @@ class TCN_GCN_unit(nn.Module):
         else:
             self.residual = unit_tcn(in_channels, out_channels, kernel_size=1, stride=stride)
 
-    def forward(self, x, spd_A):
-        # (4, 3, 64, 25)
-        y, A_spd, A, A_fn, alpha = self.gcn1(x, spd_A)
-        y = self.relu(self.tcn1(y) + self.residual(x))
-        return y, A_spd, A, A_fn, alpha
-
-
-class MultiHeadSelfAttention(nn.Module):
-    dim_in: int  # input dimension
-    dim_k: int  # key and query dimension
-    dim_v: int  # value dimension
-    num_heads: int  # number of heads, for each head, dim_* = dim_* // num_heads
-
-    def __init__(self, dim_in, dim_k, dim_v, num_heads=8):
-        super(MultiHeadSelfAttention, self).__init__()
-        # 维度必须能被num_head 整除
-        assert dim_k % num_heads == 0 and dim_v % num_heads == 0, "dim_k and dim_v must be multiple of num_heads"
-        self.dim_in = dim_in
-        self.dim_k = dim_k
-        self.dim_v = dim_v
-        self.num_heads = num_heads
-        # 定义线性变换矩阵
-        self.linear_q = nn.Linear(dim_in, dim_k, bias=False)
-        self.linear_k = nn.Linear(dim_in, dim_k, bias=False)
-        self.linear_v = nn.Linear(dim_in, dim_v, bias=False)
-        self._norm_fact = 1 / math.sqrt(dim_k // num_heads)
-
     def forward(self, x):
-        # x: tensor of shape (batch, n, dim_in)
-        batch, n, dim_in = x.shape
-        assert dim_in == self.dim_in
-
-        nh = self.num_heads
-        dk = self.dim_k // nh  # dim_k of each head
-        dv = self.dim_v // nh  # dim_v of each head
-
-        q = self.linear_q(x).reshape(batch, n, nh, dk).transpose(1, 2)  # (batch, nh, n, dk)
-        k = self.linear_k(x).reshape(batch, n, nh, dk).transpose(1, 2)  # (batch, nh, n, dk)
-        v = self.linear_v(x).reshape(batch, n, nh, dv).transpose(1, 2)  # (batch, nh, n, dv)
-
-        dist = torch.matmul(q, k.transpose(2, 3)) * self._norm_fact  # batch, nh, n, n
-        dist = torch.softmax(dist, dim=-1)  # batch, nh, n, n
-
-        att = torch.matmul(dist, v)  # batch, nh, n, dv
-        att = att.transpose(1, 2).reshape(batch, n, self.dim_v)  # batch, n, dim_v
-        return att
+        # (4, 3, 64, 25)
+        y, A3, A6, A_fn, alpha, beta = self.gcn1(x)
+        y = self.relu(self.tcn1(y) + self.residual(x))
+        return y, A3, A6, A_fn, alpha, beta
 
 
 class Model(nn.Module):
@@ -410,71 +399,109 @@ class Model(nn.Module):
             Graph = import_class(graph)
             self.graph = Graph(**graph_args)
 
-        self.stage1 = Stage1(self.graph, c_dim=17)
-        self.stage2 = Stage2(num_class, num_point, num_person, self.graph, in_channels, drop_out)
+        self.spdmodel = SPDModel(self.graph, tocpu=True)
+        self.gcn_tcn = GCN_TCN(num_class, num_point, num_person, self.graph, in_channels, drop_out)
 
     def forward(self, x):
-        spd_A = self.stage1().cuda(x.get_device())
-        x = self.stage2(x, spd_A)
+        # device = x.device
+        # spd_A = self.spdmodel(device)  # 60, 25, 25
+        x = self.gcn_tcn(x)
         return x
 
 
-class Stage1(nn.Module):
-    def __init__(self, graph, c_dim=21):
-        super(Stage1, self).__init__()
-        self.spd_A = nn.Parameter(torch.from_numpy(graph.spd_A.astype(np.float32)))
-        # self.pre_spd_conv = nn.Conv2d(6, 6, kernel_size=3, stride=2, padding=3)
-        self.pre_spd_conv = nn.Sequential(
-            nn.Conv2d(6, 6, kernel_size=5),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(6, 6, kernel_size=5),
-            nn.ReLU(inplace=True),
-        )
-        self.spdn = unit_spd()
-        self.layer3 = nn.Linear(625, 36)
-        # self.beta = nn.Parameter(torch.zeros(1))
-        self.c_dim = c_dim
-        self.conv = nn.Conv2d(1, 6, kernel_size=1)
-        self.relu = nn.ReLU(inplace=True)
+class SPDModel(nn.Module):
+    def __init__(self, graph, tocpu=True):
+        super(SPDModel, self).__init__()
+        self.spd_A = Variable(torch.from_numpy(graph.spd_A.astype(np.float32)), requires_grad=True)
 
-    def forward(self):
-        device = self.spd_A.device
-        self.spdn = self.spdn.to('cpu')
-        spd_A = self.spd_A.view(1, 6, 25, 25)
-        spd_A = self.pre_spd_conv(spd_A).view(6, self.c_dim ** 2).detach().cpu().numpy()
-        spd_A = np.cov(spd_A, rowvar=False)
-        spd_A = torch.from_numpy(spd_A).to(torch.float32).view(1, 1, self.c_dim ** 2, self.c_dim ** 2)
-        spd_A = self.spdn(spd_A).view(1, 25, 25)
-        spd_A = spd_A.to(device)
-        self.spdn = self.spdn.to(device)
-        spd_A = self.relu(self.conv(spd_A))
+        self.spdcovn1 = SPDCov2d(1, 1, kernel_size=5, stride=2)
+        self.bimap1 = BiMap(1, 1, 311, 150)
 
-        return spd_A
+        self.spdcovn2 = SPDCov2d(1, 1, kernel_size=5, stride=2)
+        self.bimap2 = BiMap(1, 1, 73, 25)
+
+        self.rieig = ReEig()
+        self.logeig = LogEig()
+        self.cpu = False
+        self.tocpu = tocpu
+
+    def forward(self, device):
+        if self.tocpu:
+            if not self.cpu:
+                self.rieig = self.rieig.to('cpu')
+                self.bimap1 = self.bimap1.to('cpu')
+                self.bimap2 = self.bimap2.to('cpu')
+                self.logeig = self.logeig.to('cpu')
+                self.cpu = True
+
+        x = self.spd_A.view(6, -1).to(device)
+        x = torch.cov(x.T).unsqueeze(0).unsqueeze(0)  # 1, 1, 625, 625
+
+        x = self.spdcovn1(x)
+        x = self.cpu_model(x, device, self.bimap1)
+        x = self.cpu_model(x, device, self.rieig)
+
+        x = self.spdcovn2(x)
+        x = self.cpu_model(x, device, self.bimap2)
+        x = self.cpu_model(x, device, self.rieig)
+
+        x = self.cpu_model(x, device, self.logeig)
+
+        return x
+
+    def cpu_model(self, x, device, model):
+        if self.tocpu:
+            x = x.to('cpu')
+            x = model(x)  # 12, 50, 50
+            x = x.to(device)
+        else:
+            x = model(x)
+
+        return x
 
 
-class Stage2(nn.Module):
+class GCN_TCN(nn.Module):
     def __init__(self, num_class=60, num_point=25, num_person=2, graph=None, in_channels=3,
                  drop_out=0):
-        super(Stage2, self).__init__()
+        super(GCN_TCN, self).__init__()
 
-        A = graph.A6  # 6,25,25
+        A3 = graph.A3  # 3,25,25
+        A6 = graph.A6  # 6,25,25
 
         self.num_class = num_class
         self.num_point = num_point
         self.data_bn = nn.BatchNorm1d(num_person * in_channels * num_point)
 
-        base_channel = 64
+        base_channel = 60
         # (4, 3, 64, 25)
-        self.l1 = TCN_GCN_unit(in_channels, base_channel, A, residual=False)
-        self.l2 = TCN_GCN_unit(base_channel, base_channel, A)
-        self.l3 = TCN_GCN_unit(base_channel, base_channel, A)
-        self.l4 = TCN_GCN_unit(base_channel, base_channel, A)
-        self.l5 = TCN_GCN_unit(base_channel, base_channel * 2, A, stride=2)
-        self.l6 = TCN_GCN_unit(base_channel * 2, base_channel * 2, A)
-        self.l7 = TCN_GCN_unit(base_channel * 2, base_channel * 2, A)
-        self.l8 = TCN_GCN_unit(base_channel * 2, base_channel * 4, A, stride=2)
-        self.l9 = TCN_GCN_unit(base_channel * 4, base_channel * 4, A)
-        self.l10 = TCN_GCN_unit(base_channel * 4, base_channel * 4, A)
+        self.l1 = TCN_GCN_unit(in_channels, base_channel, A3, A6, residual=False)
+        self.l2 = TCN_GCN_unit(base_channel, base_channel, A3, A6)
+        self.l3 = TCN_GCN_unit(base_channel, base_channel, A3, A6)
+        self.l4 = TCN_GCN_unit(base_channel, base_channel, A3, A6)
+        self.l5 = TCN_GCN_unit(base_channel, base_channel * 2, A3, A6, stride=2)
+        self.l6 = TCN_GCN_unit(base_channel * 2, base_channel * 2, A3, A6)
+        self.l7 = TCN_GCN_unit(base_channel * 2, base_channel * 2, A3, A6)
+        self.l8 = TCN_GCN_unit(base_channel * 2, base_channel * 4, A3, A6, stride=2)
+        self.l9 = TCN_GCN_unit(base_channel * 4, base_channel * 4, A3, A6)
+        self.l10 = TCN_GCN_unit(base_channel * 4, base_channel * 4, A3, A6)
+
+        # self.up = nn.Conv2d(4, base_channel, kernel_size=1)
+        # self.up1 = nn.Conv2d(base_channel, base_channel * 2, kernel_size=1)
+        # self.up2 = nn.Conv2d(base_channel * 2, base_channel * 4, kernel_size=1)
+
+        # Retrospect Model
+        self.first_tram = nn.Sequential(
+            nn.AvgPool2d((4, 1)),
+            nn.Conv2d(60, 240, 1),
+            nn.BatchNorm2d(240),
+            nn.ReLU()
+        )
+        self.second_tram = nn.Sequential(
+            nn.AvgPool2d((2, 1)),
+            nn.Conv2d(120, 240, 1),
+            nn.BatchNorm2d(240),
+            nn.ReLU()
+        )
 
         self.fc = nn.Linear(base_channel * 4, num_class)
         nn.init.normal_(self.fc.weight, 0, math.sqrt(2. / num_class))
@@ -484,21 +511,8 @@ class Stage2(nn.Module):
         else:
             self.drop_out = lambda x: x
 
-            # Retrospect Model
-            self.first_tram = nn.Sequential(
-                nn.AvgPool2d((4, 1)),
-                nn.Conv2d(64, 256, 1),
-                nn.BatchNorm2d(256),
-                nn.ReLU()
-            )
-            self.second_tram = nn.Sequential(
-                nn.AvgPool2d((2, 1)),
-                nn.Conv2d(128, 256, 1),
-                nn.BatchNorm2d(256),
-                nn.ReLU()
-            )
-
-    def forward(self, x, spd_A):
+    def forward(self, x):
+        log = {'image': {}, 'pram': {}}
         """
             N 视频个数(batch_size)
             C = 3 (X,Y,S)代表一个点的信息(位置+预测的可能性)
@@ -519,18 +533,18 @@ class Stage2(nn.Module):
         x = x.view(N, M, V, C, T).permute(0, 1, 3, 4, 2).contiguous().view(N * M, C, T, V)
         # N MVC T -> N M V C T -> N M C T V -> NM C T V
 
-        x = self.l1(x, spd_A)[0]  # (N*M, 64, 64, 25)
-        x = self.l2(x, spd_A)[0]  # (N*M, 64, 64, 25)
-        x = self.l3(x, spd_A)[0]  # (N*M, 64, 64, 25)
-        x = self.l4(x, spd_A)[0]  # (N*M, 64, 64, 25)
+        x = self.l1(x)[0]  # (N*M, 64, 64, 25)
+        x = self.l2(x)[0]  # (N*M, 64, 64, 25)
+        x = self.l3(x)[0]  # (N*M, 64, 64, 25)
+        x = self.l4(x)[0]  # (N*M, 60, 64, 25)
         x2 = x
-        x = self.l5(x, spd_A)[0]  # (N*M, 128, 32, 25)
-        x = self.l6(x, spd_A)[0]  # (N*M, 128, 32, 25)
-        x = self.l7(x, spd_A)[0]  # (N*M, 128, 32, 25)
+        x = self.l5(x)[0]  # (N*M, 128, 32, 25)
+        x = self.l6(x)[0]  # (N*M, 128, 32, 25)
+        x = self.l7(x)[0]  # (N*M, 120, 32, 25)
         x3 = x
-        x = self.l8(x, spd_A)[0]  # (N*M, 256, 16, 25)
-        x = self.l9(x, spd_A)[0]  # (N*M, 256, 16, 25)
-        x, A_spd, A, A_fn, alpha = self.l10(x, spd_A)  # (N*M, 256, 16, 25)
+        x = self.l8(x)[0]  # (N*M, 240, 16, 25)
+        x = self.l9(x)[0]  # (N*M, 240, 16, 25)
+        x, A3, A6, A_fn, alpha, beta = self.l10(x)  # (N*M, 240, 16, 25)
 
         x2 = self.first_tram(x2)
         x3 = self.second_tram(x3)
@@ -538,10 +552,19 @@ class Stage2(nn.Module):
 
         # N*M,C,T,V
         c_new = x.size(1)
-        x = x.view(N, M, c_new, -1)
+        x = x.view(N, M, c_new, -1)  # N, M, C, T*V
         x = x.mean(3).mean(1)
         x = self.drop_out(x)
 
+        log['image'] = {
+            'A3': A3,
+            'A6': A6,
+            'A_fn': A_fn,
+        }
 
+        log['pram'] = {
+            'beta': beta,
+            'alpha': alpha
+        }
 
-        return [self.fc(x), A_spd, A, A_fn, alpha]
+        return self.fc(x), log

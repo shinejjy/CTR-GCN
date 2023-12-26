@@ -3,7 +3,11 @@ import torch as th
 import torch.nn as nn
 # from torch.autograd import Function as F
 from . import functional
+import geoopt
 from torch.nn import functional as F
+import geoopt.manifolds.symmetric_positive_definite
+# import SymmetricPositiveDefinite
+from geoopt.manifolds import Stiefel
 
 dtype = th.float32
 device = th.device('cpu')
@@ -24,20 +28,62 @@ class SPDCov2d(nn.Module):
     def forward(self, x):
         V = self.V
         V_T = torch.einsum('oiuv->oivu', V)
-        W = torch.einsum('oiuv, oivw -> oiuw', V_T, V) + 1e-3 * torch.eye(self.kernel_size)  # 构建SPD
+        W = torch.einsum('oiuv, oivw -> oiuw', V_T, V) + 1e-3 * torch.eye(self.kernel_size, device=V.device)  # 构建SPD
         x = F.conv2d(x, W, stride=self.stride, padding=self.padding)
         return x
 
 
 class DiagonalizingLayer(nn.Module):
-    def __init__(self):
+    def __init__(self, tocpu=True):
         super(DiagonalizingLayer, self).__init__()
+        self.reeig = ReEig()
+        self.cpu = False
+        self.tocpu = tocpu
 
     def forward(self, x):
-        x = torch.cosh(x).view(x.shape[0], -1)
-        x = torch.cosh(x).view(x.shape[0], -1)
+        device = x.device
+        if self.tocpu:
+            if not self.cpu:
+                self.reeig = self.reeig.to('cpu')
+                self.cpu = False
+        if self.tocpu:
+            x = x.to('cpu')
+        x = self.reeig(x).view(x.shape[1], -1)
         x = torch.stack([torch.diag(xi) for xi in x])
+
+        if self.tocpu:
+            x = x.to(device)
         return x
+
+
+def bimap(X, W):
+    '''
+    Bilinear mapping function
+    :param X: Input matrix of shape (batch_size,n_in,n_in)
+    :param W: Stiefel parameter of shape (n_in,n_out)
+    :return: Bilinearly mapped matrix of shape (batch_size,n_out,n_out)
+    '''
+    return W.t().matmul(X.to(torch.float32)).matmul(W)
+
+
+class BiMapGeo(nn.Module):
+    def __init__(self, ho, hi, ni, no):
+        super(BiMapGeo, self).__init__()
+        self.W = geoopt.ManifoldParameter(x=th.empty(ho, hi, ni, no), manifold=Stiefel)
+        self._ho = ho
+        self._hi = hi
+        self._ni = ni
+        self._no = no
+        functional.init_bimap_parameter(self.W)
+
+    def forward(self, x):
+        W = self.W
+        batch_size, channels_in, n_in, _ = x.shape
+        channels_out, _, _, n_out = W.shape
+        P = th.zeros(batch_size, channels_out, n_out, n_out, dtype=x.dtype, device=x.device)
+        for co in range(channels_out):
+            P[:, co, :, :] = sum([bimap(x[:, ci, :, :], W[co, ci, :, :]) for ci in range(channels_in)])
+        return P
 
 
 class BiMap(nn.Module):
@@ -57,7 +103,6 @@ class BiMap(nn.Module):
         functional.init_bimap_parameter(self._W)
 
     def forward(self, X):
-        self._W = self._W.to('cpu')
         return functional.bimap_channels(X, self._W)
 
 

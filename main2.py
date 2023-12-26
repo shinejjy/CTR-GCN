@@ -11,6 +11,8 @@ import sys
 import time
 from collections import OrderedDict
 import traceback
+
+from matplotlib import pyplot as plt
 from sklearn.metrics import confusion_matrix
 import csv
 import numpy as np
@@ -25,10 +27,12 @@ import yaml
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
 from model.spd.optimizers import MixOptimizer
-from model.spd.nn import BiMap, ReEig, LogEig
 
-from torchlight.torchlight.io import DictAction
+from torchlight.io import DictAction
 
+import matplotlib as mpl
+mpl.use('Agg')
+print(plt.get_backend())
 
 # import resource
 # rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -43,6 +47,7 @@ def init_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+
 def import_class(import_str):
     mod_str, _sep, class_str = import_str.rpartition('.')
     __import__(mod_str)
@@ -50,6 +55,7 @@ def import_class(import_str):
         return getattr(sys.modules[mod_str], class_str)
     except AttributeError:
         raise ImportError('Class %s cannot be found (%s)' % (class_str, traceback.format_exception(*sys.exc_info())))
+
 
 def str2bool(v):
     if v.lower() in ('yes', 'true', 't', 'y', '1'):
@@ -207,12 +213,22 @@ def get_parser():
         default=0.1,
         help='decay rate for learning rate')
     parser.add_argument('--warm_up_epoch', type=int, default=0)
+    parser.add_argument(
+        '--backstage',
+        type=int,
+        default=0
+    )
+    parser.add_argument(
+        '--delete',
+        type=int,
+        default=0
+    )
 
     return parser
 
 
 class Processor():
-    """ 
+    """
         Processor for Skeleton-based Action Recgnition
     """
 
@@ -224,11 +240,18 @@ class Processor():
                 arg.model_saved_name = os.path.join(arg.work_dir, 'runs')
                 if os.path.isdir(arg.model_saved_name):
                     print('log_dir: ', arg.model_saved_name, 'already exist')
-                    answer = input('delete it? y/n:')
+                    if arg.backstage == 1:
+                        if arg.delete == 1:
+                            answer = 'y'
+                        else:
+                            answer = 'n'
+                    else:
+                        answer = input('delete it? y/n:')
                     if answer == 'y':
                         shutil.rmtree(arg.model_saved_name)
                         print('Dir removed: ', arg.model_saved_name)
-                        input('Refresh the website of tensorboard by pressing any keys')
+                        if arg.backstage == 0:
+                            input('Refresh the website of tensorboard by pressing any keys')
                     else:
                         print('Dir not removed: ', arg.model_saved_name)
                 self.train_writer = SummaryWriter(os.path.join(arg.model_saved_name, 'train'), 'train')
@@ -248,10 +271,15 @@ class Processor():
         self.best_acc = 0
         self.best_acc_epoch = 0
 
-        self.model.stage2 = self.model.stage2.cuda(self.output_device)
+        # if self.arg.spd == 1:
+        #     self.model.stage2 = self.model.stage2.cuda(self.output_device)
+        # else:
+        self.model = self.model.cuda(self.output_device)
 
+        self.multi_gpu = False
         if type(self.arg.device) is list:
             if len(self.arg.device) > 1:
+                self.multi_gpu = True
                 self.model = nn.DataParallel(
                     self.model,
                     device_ids=self.arg.device,
@@ -320,20 +348,6 @@ class Processor():
                 state.update(weights)
                 self.model.load_state_dict(state)
 
-        # if self.arg.spd == 1:
-        #     def move_modules_by_classes_to_cpu(model, target_classes):
-        #         for name, module in model.named_children():
-        #             for target_class in target_classes:
-        #                 if isinstance(module, target_class):
-        #                     module.to('cpu')  # 将包含目标类的模块移动到 CPU
-        #                     break  # 跳出内部循环，避免多次移动同一模块
-        #             else:
-        #                 # 如果当前模块不是目标类，递归查找其子模块
-        #                 move_modules_by_classes_to_cpu(module, target_classes)
-        #
-        #     spd_class = [BiMap, ReEig, LogEig]
-        #     move_modules_by_classes_to_cpu(self.model, spd_class)
-
     def load_optimizer(self):
         if self.arg.spd == 0:
             if self.arg.optimizer == 'SGD':
@@ -352,18 +366,12 @@ class Processor():
                 raise ValueError()
 
         else:
-            self.optimizer1 = MixOptimizer(
-                self.model.stage1.parameters(),
+            self.optimizer = MixOptimizer(
+                self.model.parameters(),
                 lr=self.arg.base_lr,
                 momentum=0.9,
                 nesterov=self.arg.nesterov,
                 weight_decay=self.arg.weight_decay)
-            self.optimizer2 = optim.SGD(
-                    self.model.stage2.parameters(),
-                    lr=self.arg.base_lr,
-                    momentum=0.9,
-                    nesterov=self.arg.nesterov,
-                    weight_decay=self.arg.weight_decay)
 
         self.print_log('using warm up, epoch: {}'.format(self.arg.warm_up_epoch))
 
@@ -388,9 +396,7 @@ class Processor():
                     param_group['lr'] = lr
                 return lr
             else:
-                self.optimizer1.adjust_learning_rate(lr)
-                for param_group in self.optimizer2.param_groups:
-                    param_group['lr'] = lr
+                self.optimizer.adjust_learning_rate(lr)
                 return lr
         else:
             raise ValueError()
@@ -431,15 +437,6 @@ class Processor():
         timer = dict(dataloader=0.001, model=0.001, statistics=0.001)
         process = tqdm(loader, ncols=40)
 
-        if epoch % 2 == 0:
-            self.model.stage1.train()
-            self.model.stage2.train()
-            stage = 2
-        else:
-            self.model.stage1.train()
-            self.model.stage2.eval()
-            stage = 1
-
         for batch_idx, (data, label, index) in enumerate(process):
             self.global_step += 1
             with torch.no_grad():
@@ -448,20 +445,12 @@ class Processor():
             timer['dataloader'] += self.split_time()
 
             # forward
-            output = self.model(data)
+            output, _, _, _, _ = self.model(data)
             loss = self.loss(output, label)
             # backward
-
-            if stage == 1:
-                self.optimizer1.zero_grad()
-                self.optimizer2.zero_grad()
-                loss.backward()
-                self.optimizer1.step()
-                self.optimizer2.step()
-            else:
-                self.optimizer2.zero_grad()
-                loss.backward()
-                self.optimizer2.step()
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
 
             loss_value.append(loss.data.item())
             timer['model'] += self.split_time()
@@ -472,11 +461,19 @@ class Processor():
             self.train_writer.add_scalar('acc', acc, self.global_step)
             self.train_writer.add_scalar('loss', loss.data.item(), self.global_step)
 
+            # if (self.global_step + 1) % 200 == 0:
+            #     A3 = A3.cpu().numpy()
+            #     A6 = A6.cpu().numpy()
+            #     A_fn = A_fn.cpu().numpy()
+            #     self.train_writer.add_scalar('alpha', alpha.data.mean().item(), self.global_step)
+            #     self.train_writer.add_scalar('beta', beta.data.mean().item(), self.global_step)
+            #     self.plot_and_log_tensorboard(A3, A6, A_fn)
+
             # statistics
             if self.arg.spd == 0:
                 self.lr = self.optimizer.param_groups[0]['lr']
             else:
-                self.lr = self.optimizer1.lr
+                self.lr = self.optimizer.lr
             self.train_writer.add_scalar('lr', self.lr, self.global_step)
             timer['statistics'] += self.split_time()
 
@@ -486,14 +483,73 @@ class Processor():
             for k, v in timer.items()
         }
         self.print_log(
-            '\tMean training loss: {:.4f}.  Mean training acc: {:.2f}%.'.format(np.mean(loss_value), np.mean(acc_value)*100))
+            '\tMean training loss: {:.4f}.  Mean training acc: {:.2f}%.'.format(np.mean(loss_value),
+                                                                                np.mean(acc_value) * 100))
         self.print_log('\tTime consumption: [Data]{dataloader}, [Network]{model}'.format(**proportion))
 
         if save_model:
             state_dict = self.model.state_dict()
             weights = OrderedDict([[k.split('module.')[-1], v.cpu()] for k, v in state_dict.items()])
 
-            torch.save(weights, self.arg.model_saved_name + '-' + str(epoch+1) + '-' + str(int(self.global_step)) + '.pt')
+            torch.save(weights,
+                       self.arg.model_saved_name + '-' + str(epoch + 1) + '-' + str(int(self.global_step)) + '.pt')
+
+    def plot_and_log_tensorboard(self, A1, A2, A3):
+        # 创建一个12个子图的画布，每个子图都是一个矩阵
+        fig, axs = plt.subplots(2, 3, figsize=(12, 9))
+
+        # 将A的每个通道画在前6个子图上
+        for i in range(3):
+            row = i // 3
+            col = i % 3
+            axs[row, col].imshow(A1[i], cmap='jet', interpolation='nearest')
+            axs[row, col].set_title(f'A3 Channel {i}')
+            axs[row, col].axis('off')
+
+        plt.tight_layout()
+
+        # 将画布转为tensor并记录到TensorBoard
+        image_np = plt.gcf()
+        image_np.canvas.draw()
+        image_tensor = torch.tensor(np.array(image_np.canvas.renderer.buffer_rgba())).permute(2, 0, 1)
+        self.train_writer.add_image('A3', image_tensor, self.global_step)
+        plt.close()
+
+        fig, axs = plt.subplots(2, 3, figsize=(12, 9))
+        # 将A_all的每个通道画在后6个子图上
+        for i in range(6):
+            row = i // 3
+            col = i % 3
+            axs[row, col].imshow(A2[i], cmap='jet', interpolation='nearest')
+            axs[row, col].set_title(f'A6 Channel {i}')
+            axs[row, col].axis('off')
+
+        plt.tight_layout()
+
+        # 将画布转为tensor并记录到TensorBoard
+        image_np = plt.gcf()
+        image_np.canvas.draw()
+        image_tensor = torch.tensor(np.array(image_np.canvas.renderer.buffer_rgba())).permute(2, 0, 1)
+        self.train_writer.add_image('A6', image_tensor, self.global_step)
+        plt.close()
+
+        fig, axs = plt.subplots(2, 3, figsize=(12, 9))
+        # 将A_at的每个通道画在后6个子图上
+        for i in range(3):
+            row = i // 3
+            col = i % 3
+            axs[row, col].imshow(A3[i], cmap='jet', interpolation='nearest')
+            axs[row, col].set_title(f'A_fn Channel {i}')
+            axs[row, col].axis('off')
+
+        plt.tight_layout()
+
+        # 将画布转为tensor并记录到TensorBoard
+        image_np = plt.gcf()
+        image_np.canvas.draw()
+        image_tensor = torch.tensor(np.array(image_np.canvas.renderer.buffer_rgba())).permute(2, 0, 1)
+        self.train_writer.add_image('A_fn', image_tensor, self.global_step)
+        plt.close()
 
     def eval(self, epoch, save_score=False, loader_name=['test'], wrong_file=None, result_file=None):
         if wrong_file is not None:
@@ -514,7 +570,7 @@ class Processor():
                 with torch.no_grad():
                     data = data.float().cuda(self.output_device)
                     label = label.long().cuda(self.output_device)
-                    output = self.model(data)
+                    output, _, _, _, _ = self.model(data)
                     loss = self.loss(output, label)
                     score_frag.append(output.data.cpu().numpy())
                     loss_value.append(loss.data.item())
@@ -574,23 +630,25 @@ class Processor():
         if self.arg.phase == 'train':
             self.print_log('Parameters:\n{}\n'.format(str(vars(self.arg))))
             self.global_step = self.arg.start_epoch * len(self.data_loader['train'])  # / self.arg.batch_size
+
             def count_parameters(model):
                 return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
             self.print_log(f'# Parameters: {count_parameters(self.model)}')
             for epoch in range(self.arg.start_epoch, self.arg.num_epoch):
                 save_model = (((epoch + 1) % self.arg.save_interval == 0) or (
-                        epoch + 1 == self.arg.num_epoch)) and (epoch+1) > self.arg.save_epoch
+                        epoch + 1 == self.arg.num_epoch)) and (epoch + 1) > self.arg.save_epoch
 
                 self.train(epoch, save_model=save_model)
 
                 self.eval(epoch, save_score=self.arg.save_score, loader_name=['test'])
 
             # test the best model
-            weights_path = glob.glob(os.path.join(self.arg.work_dir, 'runs-'+str(self.best_acc_epoch)+'*'))[0]
+            weights_path = glob.glob(os.path.join(self.arg.work_dir, 'runs-' + str(self.best_acc_epoch) + '*'))[0]
             weights = torch.load(weights_path)
             if type(self.arg.device) is list:
                 if len(self.arg.device) > 1:
-                    weights = OrderedDict([['module.'+k, v.cuda(self.output_device)] for k, v in weights.items()])
+                    weights = OrderedDict([['module.' + k, v.cuda(self.output_device)] for k, v in weights.items()])
             self.model.load_state_dict(weights)
 
             wf = weights_path.replace('.pt', '_wrong.txt')
@@ -598,7 +656,6 @@ class Processor():
             self.arg.print_log = False
             self.eval(epoch=0, save_score=True, loader_name=['test'], wrong_file=wf, result_file=rf)
             self.arg.print_log = True
-
 
             num_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
             self.print_log(f'Best accuracy: {self.best_acc}')
@@ -622,6 +679,7 @@ class Processor():
             self.print_log('Weights: {}.'.format(self.arg.weights))
             self.eval(epoch=0, save_score=self.arg.save_score, loader_name=['test'], wrong_file=wf, result_file=rf)
             self.print_log('Done.\n')
+
 
 if __name__ == '__main__':
     parser = get_parser()
