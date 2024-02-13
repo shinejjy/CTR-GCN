@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from torch.autograd import Variable
 from model.spd.nn import BiMap, LogEig, ReEig
+import torch.nn.functional as F
 
 
 def import_class(name):
@@ -149,6 +150,72 @@ class MultiScale_TemporalConv(nn.Module):
         return out
 
 
+class Temporal_GCN_block(nn.Module):
+    def __init__(self, in_channel, rel_channel):
+        super(Temporal_GCN_block, self).__init__()
+        self.conv1 = nn.Conv2d(in_channel, in_channel // rel_channel, kernel_size=1)
+        self.conv2 = nn.Conv2d(in_channel, in_channel // rel_channel, kernel_size=1)
+
+    def forward(self, x):
+        x1 = self.conv1(x)  # (b, c', t, v)
+        x2 = self.conv2(x)  # (b, c', t, v)
+        b, c, t, v = x1.shape
+        x1 = x1.permute(0, 2, 1, 3).reshape(b, t, -1)
+        x2 = x2.permute(0, 1, 3, 2).reshape(b, -1, t)
+        At = torch.matmul(x1, x2)
+        At = F.softmax(At, dim=1)
+
+        return At
+
+
+class Temporal_GCN(nn.Module):
+    def __init__(self, in_channel, t, rel_channel=4, n_head=4):
+        super(Temporal_GCN, self).__init__()
+        self.n_head = n_head
+        self.temporal_gcn_blocks = nn.ModuleList([Temporal_GCN_block(in_channel, rel_channel) for _ in range(n_head)])
+        self.fcs = nn.ModuleList([nn.Conv2d(in_channel, in_channel, kernel_size=1) for _ in range(n_head)])
+        self.bn = nn.BatchNorm2d(in_channel)
+        self.relu = nn.ReLU(inplace=True)
+        self.alpha = nn.Parameter(torch.zeros(1, dtype=torch.float32))
+        self.A = nn.Parameter(self.temporal_real_adj(t, step=2))
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                conv_init(m)
+            elif isinstance(m, nn.BatchNorm2d):
+                bn_init(m, 1)
+
+    @classmethod
+    def temporal_real_adj(self, t, step=2):
+        adj = torch.zeros((t, t), dtype=torch.float)
+        for i in range(t):
+            adj[i, max(0, i - step):min(t, i + step + 1)] = 1
+
+        # 行归一化
+        row_sum = adj.sum(dim=1, keepdim=True)
+        adj_normalized = adj / row_sum
+
+        return adj_normalized
+
+    def forward(self, x):
+        # x.shape (b, c, t, v)
+        multi_At = [tem_gcn(x) for tem_gcn in self.temporal_gcn_blocks]  # At.shape (t, t)
+        y = None
+
+        temporal_A = None
+        for i in range(self.n_head):
+            temporal_A = self.alpha * multi_At[i] + self.A
+            z = torch.einsum('btg,bctv->bcgv', temporal_A, x)
+            z = self.fcs[i](z)
+            y = y + z if y is not None else z
+
+        y = self.bn(y)
+        y += x
+        y = self.relu(y)
+
+        return y, temporal_A
+
+
 class CTRGC_1(nn.Module):
     def __init__(self, in_channels, out_channels, rel_reduction=8, mid_reduction=1):
         super(CTRGC_1, self).__init__()
@@ -180,7 +247,8 @@ class CTRGC_1(nn.Module):
         # (4, 8, 25) (4, 8, 25) (4, 64, 64, 25)
         x1 = self.tanh(x1.unsqueeze(-1) - x2.unsqueeze(-2))
         # (4, 64, 25, 25)
-        x1 = self.conv4(x1) * alpha + (A3.unsqueeze(0).unsqueeze(0) if A3 is not None else 0) + A6_ex.unsqueeze(0) * beta  # N,C,V,V
+        x1 = self.conv4(x1) * alpha + (A3.unsqueeze(0).unsqueeze(0) if A3 is not None else 0) + A6_ex.unsqueeze(
+            0) * beta  # N,C,V,V
         # (4, 64, 25, 25) (1, 1, 25, 25)
         return x1
 
@@ -193,9 +261,8 @@ class CTRGC_2(nn.Module):
         self.conv3 = nn.Conv2d(self.in_channels, self.out_channels, kernel_size=1)
 
     def forward(self, x, x1):
-        x3 = self.conv3(x)  # (batch_size, num_channel, t, v)
-        b, c, t, v = x3.shape
-        assert c % 6 == 0
+        # (4, 3, 64, 25)
+        x3 = self.conv3(x)
         x1 = torch.einsum('ncuv,nctv->nctu', x1, x3)
         # (4, 64, 64, 25)
         return x1
@@ -226,6 +293,7 @@ class unit_spd(nn.Module):
         x = self.spd_net(x)
 
         return x
+
 
 class unit_tcn(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=9, stride=1):
@@ -274,10 +342,12 @@ class unit_gcn(nn.Module):
 
         self.A3 = nn.Parameter(torch.from_numpy(A3.astype(np.float32)))
         self.A6 = nn.Parameter(torch.from_numpy(A6.astype(np.float32)))
+        # self.A_SE = Variable(torch.from_numpy(A.astype(np.float32)), requires_grad=False)
         self.alpha = nn.Parameter(torch.zeros(1))
         self.beta = nn.Parameter(torch.zeros(1))
+        # self.gamma = nn.Parameter(torch.zeros(1))
         self.bn = nn.BatchNorm2d(out_channels)
-        self.soft = nn.Softmax(-2)
+        # self.soft = nn.Softmax(-2)
         self.relu = nn.ReLU(inplace=True)
 
         for m in self.modules():
@@ -309,7 +379,8 @@ class unit_gcn(nn.Module):
         y += self.down(x)
         y = self.relu(y)
 
-        return y, A3.detach(), A6.detach(), A_at[:, 0, 0, :, :].squeeze(1).squeeze(1).detach(), self.alpha.detach(), self.beta.detach()
+        return y, A3.detach(), A6.detach(), A_at[:, 0, 0, :, :].squeeze(1).squeeze(
+            1).detach(), self.alpha.detach(), self.beta.detach()
 
 
 class TCN_GCN_unit(nn.Module):
@@ -445,17 +516,23 @@ class Stage2(nn.Module):
         self.data_bn = nn.BatchNorm1d(num_person * in_channels * num_point)
 
         base_channel = 60
+        base_frame = 64
         # (4, 3, 64, 25)
         self.l1 = TCN_GCN_unit(in_channels, base_channel, A3, A6, residual=False)
         self.l2 = TCN_GCN_unit(base_channel, base_channel, A3, A6)
         self.l3 = TCN_GCN_unit(base_channel, base_channel, A3, A6)
         self.l4 = TCN_GCN_unit(base_channel, base_channel, A3, A6)
+        self.tem_gcn_bottom = Temporal_GCN(base_channel, t=base_frame, rel_channel=4, n_head=4)
+
         self.l5 = TCN_GCN_unit(base_channel, base_channel * 2, A3, A6, stride=2)
         self.l6 = TCN_GCN_unit(base_channel * 2, base_channel * 2, A3, A6)
         self.l7 = TCN_GCN_unit(base_channel * 2, base_channel * 2, A3, A6)
+        self.tem_gcn_middle = Temporal_GCN(base_channel * 2, t=base_frame//2, rel_channel=4, n_head=4)
+
         self.l8 = TCN_GCN_unit(base_channel * 2, base_channel * 4, A3, A6, stride=2)
         self.l9 = TCN_GCN_unit(base_channel * 4, base_channel * 4, A3, A6)
         self.l10 = TCN_GCN_unit(base_channel * 4, base_channel * 4, A3, A6)
+        self.tem_gcn_top = Temporal_GCN(base_channel * 4, t=base_frame//4, rel_channel=4, n_head=4)
 
         self.fc = nn.Linear(base_channel * 4, num_class)
         nn.init.normal_(self.fc.weight, 0, math.sqrt(2. / num_class))
@@ -464,20 +541,6 @@ class Stage2(nn.Module):
             self.drop_out = nn.Dropout(drop_out)
         else:
             self.drop_out = lambda x: x
-
-        # Retrospect Model
-        self.first_tram = nn.Sequential(
-            nn.AvgPool2d((4, 1)),
-            nn.Conv2d(60, 240, 1),
-            nn.BatchNorm2d(240),
-            nn.ReLU()
-        )
-        self.second_tram = nn.Sequential(
-            nn.AvgPool2d((2, 1)),
-            nn.Conv2d(120, 240, 1),
-            nn.BatchNorm2d(240),
-            nn.ReLU()
-        )
 
     def forward(self, x):
 
@@ -506,18 +569,15 @@ class Stage2(nn.Module):
         x = self.l2(x)[0]  # (N*M, 60, 64, 25)
         x = self.l3(x)[0]  # (N*M, 60, 64, 25)
         x = self.l4(x)[0]  # (N*M, 60, 64, 25)
-        x2 = x
+        x, temporal_A = self.tem_gcn_bottom(x)
         x = self.l5(x)[0]  # (N*M, 120, 32, 25)
         x = self.l6(x)[0]  # (N*M, 120, 32, 25)
         x = self.l7(x)[0]  # (N*M, 120, 32, 25)
-        x3 = x
+        x, temporal_A = self.tem_gcn_middle(x)
         x = self.l8(x)[0]  # (N*M, 240, 16, 25)
         x = self.l9(x)[0]  # (N*M, 240, 16, 25)
         x, A3, A6, A_fn, alpha, beta = self.l10(x)  # (N*M, 240, 16, 25)
-
-        x2 = self.first_tram(x2)
-        x3 = self.second_tram(x3)
-        x = x + x2 + x3
+        x, temporal_A = self.tem_gcn_top(x)
 
         # N*M,C,T,V
         c_new = x.size(1)
@@ -529,11 +589,13 @@ class Stage2(nn.Module):
             'A3': A3,
             'A6': A6,
             'A_fn': A_fn,
+            'temporal_A': temporal_A.detach()
         }
 
         log['pram'] = {
-            'alpha': alpha,
-            'beta': beta,
+            'a_spatial_alpha': alpha,
+            'a_beta': beta,
+            'a_temporal_alpha': self.tem_gcn_top.alpha.detach()
         }
 
         return self.fc(x), log

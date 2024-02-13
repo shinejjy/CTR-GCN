@@ -28,7 +28,8 @@ from tensorboardX import SummaryWriter
 from tqdm import tqdm
 from model.spd.optimizers import MixOptimizer
 
-from torchlight.io import DictAction
+from torchlight import DictAction
+from .data_parallel import BalancedDataParallel
 
 import matplotlib as mpl
 mpl.use('Agg')
@@ -280,10 +281,20 @@ class Processor():
         if type(self.arg.device) is list:
             if len(self.arg.device) > 1:
                 self.multi_gpu = True
-                self.model = nn.DataParallel(
-                    self.model,
-                    device_ids=self.arg.device,
-                    output_device=self.output_device)
+                if self.arg.batch_size == 64:
+                    gpu0_bsz = 16
+                    acc_grad = 8
+                    self.model = BalancedDataParallel(
+                        gpu0_bsz // acc_grad,
+                        self.model,
+                        device_ids=self.arg.device,
+                        output_device=self.output_device
+                    )
+                else:
+                    self.model = nn.DataParallel(
+                        self.model,
+                        device_ids=self.arg.device,
+                        output_device=self.output_device)
 
         # print(len(self.data_loader['train']))
 
@@ -445,7 +456,7 @@ class Processor():
             timer['dataloader'] += self.split_time()
 
             # forward
-            output, _, _, _, _ = self.model(data)
+            output, log = self.model(data)
             loss = self.loss(output, label)
             # backward
             self.optimizer.zero_grad()
@@ -461,13 +472,12 @@ class Processor():
             self.train_writer.add_scalar('acc', acc, self.global_step)
             self.train_writer.add_scalar('loss', loss.data.item(), self.global_step)
 
-            # if (self.global_step + 1) % 200 == 0:
-            #     A3 = A3.cpu().numpy()
-            #     A6 = A6.cpu().numpy()
-            #     A_fn = A_fn.cpu().numpy()
-            #     self.train_writer.add_scalar('alpha', alpha.data.mean().item(), self.global_step)
-            #     self.train_writer.add_scalar('beta', beta.data.mean().item(), self.global_step)
-            #     self.plot_and_log_tensorboard(A3, A6, A_fn)
+            if (self.global_step + 1) % 200 == 0:
+                for name, pram in log['pram'].items():
+                    pram = np.array(pram.cpu().data, dtype=np.float32)
+                    self.train_writer.add_scalar(name, pram.mean().item(), self.global_step)
+
+                self.plot_and_log_tensorboard(log)
 
             # statistics
             if self.arg.spd == 0:
@@ -494,62 +504,32 @@ class Processor():
             torch.save(weights,
                        self.arg.model_saved_name + '-' + str(epoch + 1) + '-' + str(int(self.global_step)) + '.pt')
 
-    def plot_and_log_tensorboard(self, A1, A2, A3):
-        # 创建一个12个子图的画布，每个子图都是一个矩阵
-        fig, axs = plt.subplots(2, 3, figsize=(12, 9))
+    def plot_and_log_tensorboard(self, log):
+        for name, image in log['image'].items():
+            image = image.cpu()
+            fig, axs = plt.subplots(3, 3, figsize=(12, 9))
 
-        # 将A的每个通道画在前6个子图上
-        for i in range(3):
-            row = i // 3
-            col = i % 3
-            axs[row, col].imshow(A1[i], cmap='jet', interpolation='nearest')
-            axs[row, col].set_title(f'A3 Channel {i}')
-            axs[row, col].axis('off')
+            for i in range(min(9, len(image))):
+                row = i // 3
+                col = i % 3
+                axs[row, col].imshow(image[i], cmap='jet', interpolation='nearest')
+                axs[row, col].set_title(f'{name} Channel {i}')
+                axs[row, col].axis('off')
 
-        plt.tight_layout()
+            # 删除未使用的子图
+            for i in range(len(image), 9):
+                row = i // 3
+                col = i % 3
+                fig.delaxes(axs[row, col])
 
-        # 将画布转为tensor并记录到TensorBoard
-        image_np = plt.gcf()
-        image_np.canvas.draw()
-        image_tensor = torch.tensor(np.array(image_np.canvas.renderer.buffer_rgba())).permute(2, 0, 1)
-        self.train_writer.add_image('A3', image_tensor, self.global_step)
-        plt.close()
+            plt.tight_layout()
 
-        fig, axs = plt.subplots(2, 3, figsize=(12, 9))
-        # 将A_all的每个通道画在后6个子图上
-        for i in range(6):
-            row = i // 3
-            col = i % 3
-            axs[row, col].imshow(A2[i], cmap='jet', interpolation='nearest')
-            axs[row, col].set_title(f'A6 Channel {i}')
-            axs[row, col].axis('off')
-
-        plt.tight_layout()
-
-        # 将画布转为tensor并记录到TensorBoard
-        image_np = plt.gcf()
-        image_np.canvas.draw()
-        image_tensor = torch.tensor(np.array(image_np.canvas.renderer.buffer_rgba())).permute(2, 0, 1)
-        self.train_writer.add_image('A6', image_tensor, self.global_step)
-        plt.close()
-
-        fig, axs = plt.subplots(2, 3, figsize=(12, 9))
-        # 将A_at的每个通道画在后6个子图上
-        for i in range(3):
-            row = i // 3
-            col = i % 3
-            axs[row, col].imshow(A3[i], cmap='jet', interpolation='nearest')
-            axs[row, col].set_title(f'A_fn Channel {i}')
-            axs[row, col].axis('off')
-
-        plt.tight_layout()
-
-        # 将画布转为tensor并记录到TensorBoard
-        image_np = plt.gcf()
-        image_np.canvas.draw()
-        image_tensor = torch.tensor(np.array(image_np.canvas.renderer.buffer_rgba())).permute(2, 0, 1)
-        self.train_writer.add_image('A_fn', image_tensor, self.global_step)
-        plt.close()
+            # 将画布转为tensor并记录到TensorBoard
+            image_np = plt.gcf()
+            image_np.canvas.draw()
+            image_tensor = torch.tensor(np.array(image_np.canvas.renderer.buffer_rgba())).permute(2, 0, 1)
+            self.train_writer.add_image(name, image_tensor, self.global_step)
+            plt.close()
 
     def eval(self, epoch, save_score=False, loader_name=['test'], wrong_file=None, result_file=None):
         if wrong_file is not None:
@@ -570,7 +550,7 @@ class Processor():
                 with torch.no_grad():
                     data = data.float().cuda(self.output_device)
                     label = label.long().cuda(self.output_device)
-                    output, _, _, _, _ = self.model(data)
+                    output, log = self.model(data)
                     loss = self.loss(output, label)
                     score_frag.append(output.data.cpu().numpy())
                     loss_value.append(loss.data.item())

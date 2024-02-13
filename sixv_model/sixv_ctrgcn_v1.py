@@ -490,19 +490,19 @@ class Stage2(nn.Module):
         else:
             self.drop_out = lambda x: x
 
-            # Retrospect Model
-            self.first_tram = nn.Sequential(
-                nn.AvgPool2d((4, 1)),
-                nn.Conv2d(60, 240, 1),
-                nn.BatchNorm2d(240),
-                nn.ReLU()
-            )
-            self.second_tram = nn.Sequential(
-                nn.AvgPool2d((2, 1)),
-                nn.Conv2d(120, 240, 1),
-                nn.BatchNorm2d(240),
-                nn.ReLU()
-            )
+        # Retrospect Model
+        self.first_tram = nn.Sequential(
+            nn.AvgPool2d((4, 1)),
+            nn.Conv2d(60, 240, 1),
+            nn.BatchNorm2d(240),
+            nn.ReLU()
+        )
+        self.second_tram = nn.Sequential(
+            nn.AvgPool2d((2, 1)),
+            nn.Conv2d(120, 240, 1),
+            nn.BatchNorm2d(240),
+            nn.ReLU()
+        )
 
     def forward(self, x):
         """

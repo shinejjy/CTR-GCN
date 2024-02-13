@@ -3,6 +3,7 @@ from __future__ import print_function
 
 import argparse
 import inspect
+import math
 import os
 import pickle
 import random
@@ -384,6 +385,10 @@ class Processor():
             f.write(f"# command line: {' '.join(sys.argv)}\n\n")
             yaml.dump(arg_dict, f)
 
+    def _lr_func_cosine(self, cur_epoch, cosine_base_lr, max_epoch):
+        return cosine_base_lr * (math.cos(math.pi * cur_epoch / max_epoch) +
+                                 1.0) * 0.5
+
     def adjust_learning_rate(self, epoch):
         if self.arg.optimizer == 'SGD' or self.arg.optimizer == 'Adam':
             if epoch < self.arg.warm_up_epoch:
@@ -391,6 +396,7 @@ class Processor():
             else:
                 lr = self.arg.base_lr * (
                         self.arg.lr_decay_rate ** np.sum(epoch >= np.array(self.arg.step)))
+                # lr = self._lr_func_cosine(epoch, self.arg.base_lr, self.arg.num_epoch)
             if self.arg.spd == 0:
                 for param_group in self.optimizer.param_groups:
                     param_group['lr'] = lr
@@ -463,7 +469,10 @@ class Processor():
 
             if (self.global_step + 1) % 200 == 0:
                 for name, pram in log['pram'].items():
-                    pram = np.array(pram.cpu().data, dtype=np.float32)
+                    if not isinstance(pram, nn.Parameter):
+                        pram = np.array([pram], dtype=np.float32)
+                    else:
+                        pram = np.array(pram.cpu().data, dtype=np.float32)
                     self.train_writer.add_scalar(name, pram.mean().item(), self.global_step)
 
                 self.plot_and_log_tensorboard(log)

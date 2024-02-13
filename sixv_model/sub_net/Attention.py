@@ -4,10 +4,47 @@ import torch
 from einops import rearrange
 from torch import nn
 from torch.nn import functional as F
+from inspect import isfunction
+
+
+def default(val, d):
+    if val is not None:
+        return val
+    return d() if isfunction(d) else d
+
+
+class GEGLU(nn.Module):
+    def __init__(self, dim_in, dim_out):
+        super().__init__()
+        self.proj = nn.Linear(dim_in, dim_out * 2)
+
+    def forward(self, x):
+        x, gate = self.proj(x).chunk(2, dim=-1)
+        return x * F.gelu(gate)
+
+
+class FeedForward(nn.Module):
+    def __init__(self, dim, dim_out=None, mult=4, glu=False, dropout=0.):
+        super().__init__()
+        inner_dim = int(dim * mult)
+        dim_out = default(dim_out, dim)
+        project_in = nn.Sequential(
+            nn.Linear(dim, inner_dim),
+            nn.GELU()
+        ) if not glu else GEGLU(dim, inner_dim)
+
+        self.net = nn.Sequential(
+            project_in,
+            nn.Dropout(dropout),
+            nn.Linear(inner_dim, dim_out)
+        )
+
+    def forward(self, x):
+        return self.net(x)
 
 
 class Cross_MultiAttention(nn.Module):
-    def __init__(self, in_channels, emb_dim, num_heads, att_dropout=0.0, aropout=0.0):
+    def __init__(self, in_channels, emb_dim, num_heads, dropout=0, gated_ff=True):
         super(Cross_MultiAttention, self).__init__()
         self.emb_dim = emb_dim
         self.num_heads = num_heads
@@ -20,6 +57,11 @@ class Cross_MultiAttention(nn.Module):
         self.Wk = nn.Linear(emb_dim, emb_dim)
         self.Wv = nn.Linear(emb_dim, emb_dim)
 
+        self.norm1 = nn.LayerNorm(emb_dim)
+        self.norm2 = nn.LayerNorm(emb_dim)
+
+        self.ff = FeedForward(emb_dim, dropout=dropout, glu=gated_ff)
+
     def forward(self, x_t, pad_mask=None):
         '''
 
@@ -30,15 +72,15 @@ class Cross_MultiAttention(nn.Module):
         '''
         b, c, t, v = x_t.shape
         x_j = x_t.mean(-2).permute(0, 2, 1)
-        x_t = rearrange(x_t, 'b c t v -> b (t v) c')  # [3, 60*25, 120]
+        x_t = x_t.view(b, t * v, c)  # [3, 60*25, 120]
 
-        Q = self.Wq(x_t)  # [batch_size, t, emb_dim] = [3, 60*25, 120]
+        Q = self.Wq(self.norm1(x_t))  # [batch_size, t, emb_dim] = [3, 60*25, 120]
         K = self.Wk(x_j)  # [batch_szie, num_joint, emb_dim] = [3, 25, 120]
         V = self.Wv(x_j)
 
-        Q = Q.view(b, -1, self.num_heads, self.depth).transpose(1, 2)  # [batch_size, num_heads, t, depth]
-        K = K.view(b, -1, self.num_heads, self.depth).transpose(1, 2)  # [batch_size, num_heads, num_joint, depth]
-        V = V.view(b, -1, self.num_heads, self.depth).transpose(1, 2)
+        Q = Q.view(b, -1, self.num_heads, self.depth).transpose(1, 2)  # [batch_size, num_heads, t * v // num_heads, depth]
+        K = K.view(b, -1, self.num_heads, self.depth).transpose(1, 2)  # [batch_size, num_heads, num_joint // num_heads, depth]
+        V = V.view(b, -1, self.num_heads, self.depth).transpose(1, 2)  # [batch_size, num_heads, num_joint // num_heads, depth]
 
         # [batch_size, num_heads, h*w, seq_len]
         att_weights = torch.einsum('bnid,bnjd -> bnij', Q, K)
@@ -50,12 +92,15 @@ class Cross_MultiAttention(nn.Module):
             att_weights = att_weights.masked_fill(pad_mask, -1e9)
 
         att_weights = F.softmax(att_weights, dim=-1)
-        out = torch.einsum('bnij, bnjd -> bnid', att_weights, V)
-        out = out.transpose(1, 2).contiguous().view(b, -1, self.emb_dim)  # [batch_size, t, emb_dim]
+        x_att = torch.einsum('bnij, bnjd -> bnid', att_weights, V)  # [batch_size, num_heads, t * v // num_heads, emb_dim]
+        x_att = x_att.view(b, -1, self.emb_dim)  # [batch_size, t * v, emb_dim]
 
-        out = rearrange(out, 'b (t v) c -> b c t v', t=t, v=v)
+        x_t = x_att + x_t
 
-        return out
+        x_t = self.ff(self.norm2(x_t)) + x_t
+        x_t = x_t.view(b, t, v, c).permute(0, 3, 1, 2).contiguous()
+
+        return x_t
 
 
 class MultiHeadSelfAttention(nn.Module):
