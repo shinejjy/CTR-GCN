@@ -1,3 +1,4 @@
+import geoopt
 import numpy as np
 import torch as th
 import torch.nn as nn
@@ -71,39 +72,49 @@ class MixOptimizer():
         parameters = list(parameters)
         parameters=[param for param in parameters if param.requires_grad]
         self.lr = lr
-        self.stiefel_parameters = [param for param in parameters if param.__class__.__name__=='StiefelParameter']
-        self.stiefel_block_parameters = [param for param in parameters if param.__class__.__name__=='StiefelBlockParameter']
-        self.spd_parameters = [param for param in parameters if param.__class__.__name__=='SPDParameter']
-        self.weight_vector_parameters = [param for param in parameters if param.__class__.__name__=='WeightVectorParameter']
+        # self.stiefel_parameters = [param for param in parameters if param.__class__.__name__=='StiefelParameter']
+        # self.stiefel_block_parameters = [param for param in parameters if param.__class__.__name__=='StiefelBlockParameter']
+        # self.spd_parameters = [param for param in parameters if param.__class__.__name__=='SPDParameter']
+        # self.weight_vector_parameters = [param for param in parameters if param.__class__.__name__=='WeightVectorParameter']
+        self.riemannian_parameters  = [param for param in parameters if param.__class__.__name__ == 'ManifoldParameter']
         self.other_parameters = [param for param in parameters if param.__class__.__name__=='Parameter']
 
-        self.stiefel_optim = StiefelOptim(self.stiefel_parameters, self.lr)
-        self.stiefel_block_optim = StiefelBlockOptim(self.stiefel_block_parameters, self.lr)
-        self.spd_optim = SPDOptim(self.spd_parameters, self.lr)
-        self.weight_vector_optim = WeightVectorOptim(self.weight_vector_parameters, self.lr)
+        # self.stiefel_optim = StiefelOptim(self.stiefel_parameters, self.lr)
+        # self.stiefel_block_optim = StiefelBlockOptim(self.stiefel_block_parameters, self.lr)
+        # self.spd_optim = SPDOptim(self.spd_parameters, self.lr)
+        # self.weight_vector_optim = WeightVectorOptim(self.weight_vector_parameters, self.lr)
+
+        self.riemannian_optim = geoopt.optim.RiemannianSGD(self.riemannian_parameters, lr, *args, **kwargs)
         self.optim = optimizer(self.other_parameters, lr, *args, **kwargs)
 
     def step(self):
         self.optim.step()
-        self.stiefel_optim.step()
-        self.stiefel_block_optim.step()
-        self.spd_optim.step()
-        self.weight_vector_optim.step()
+        self.riemannian_optim.step()
+        # self.stiefel_optim.step()
+        # self.stiefel_block_optim.step()
+        # self.spd_optim.step()
+        # self.weight_vector_optim.step()
 
     def zero_grad(self):
         self.optim.zero_grad()
-        self.stiefel_optim.zero_grad()
-        self.spd_optim.zero_grad()
+        self.riemannian_optim.zero_grad()
+        # self.stiefel_optim.zero_grad()
+        # self.spd_optim.zero_grad()
 
     def adjust_learning_rate(self, lr):
         for param_group in self.optim.param_groups:
             param_group['lr'] = lr
 
-        self.stiefel_optim.lr = lr
-        self.stiefel_block_optim.lr = lr
-        self.spd_optim.lr = lr
-        self.weight_vector_optim.lr = lr
+        for param_group in  self.riemannian_optim.param_groups:
+            param_group['lr'] = lr
+
         self.lr = lr
+
+        # self.stiefel_optim.lr = lr
+        # self.stiefel_block_optim.lr = lr
+        # self.spd_optim.lr = lr
+        # self.weight_vector_optim.lr = lr
+        # self.lr = lr
 
 def proj_tanX_stiefel(x,X):
     """ Projection of x in the Stiefel manifold's tangent space at X """

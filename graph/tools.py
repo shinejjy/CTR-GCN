@@ -1,6 +1,60 @@
 import numpy as np
 
 
+def get_k_body_parts_ntu(k):
+    if k == 6:
+        left_arm = [10, 11, 12, 24, 25]
+        right_arm = [6, 7, 8, 22, 23]
+        head = [3, 4]
+        body = [1, 2, 5, 9, 21]
+        left_leg = [17, 18, 19, 20]
+        right_leg = [13, 14, 15, 16]
+
+        partition_body = [left_arm, right_arm, head, body, left_leg, right_leg]
+        partition_body = [[index - 1 for index in part] for part in partition_body]
+    elif k == 8:
+        left_arm = [10, 11]
+        right_arm = [6, 7]
+        left_hand = [12, 24, 25]
+        right_hand = [8, 22, 23]
+        head = [3, 4]
+        body = [1, 2, 5, 9, 21]
+        left_leg = [17, 18, 19, 20]
+        right_leg = [13, 14, 15, 16]
+
+        partition_body = [left_arm, right_arm, left_hand, right_hand, head, body, left_leg, right_leg]
+        partition_body = [[index - 1 for index in part] for part in partition_body]
+
+    return partition_body
+
+
+def get_k_body_parts_ucla(k):
+    if k == 6:
+        left_arm = [5, 6, 7, 8]
+        right_arm = [9, 10, 11, 12]
+        head = [4]
+        body = [1, 2, 3]
+        left_leg = [13, 14, 15, 16]
+        right_leg = [17, 18, 19, 20]
+
+        partition_body = [left_arm, right_arm, head, body, left_leg, right_leg]
+        partition_body = [[index - 1 for index in part] for part in partition_body]
+    elif k == 8:
+        left_arm = [5, 6]
+        right_arm = [9, 10]
+        left_hand = [7, 8]
+        right_hand = [11, 12]
+        head = [4]
+        body = [1, 2, 3]
+        left_leg = [13, 14, 15, 16]
+        right_leg = [17, 18, 19, 20]
+
+        partition_body = [left_arm, right_arm, left_hand, right_hand, head, body, left_leg, right_leg]
+        partition_body = [[index - 1 for index in part] for part in partition_body]
+
+    return partition_body
+
+
 def get_sgp_mat(num_in, num_out, link):
     A = np.zeros((num_in, num_out))
     for i, j in link:

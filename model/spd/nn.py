@@ -4,6 +4,7 @@ import torch.nn as nn
 # from torch.autograd import Function as F
 from . import functional
 import geoopt
+from geoopt import SymmetricPositiveDefinite
 from torch.nn import functional as F
 import geoopt.manifolds.symmetric_positive_definite
 # import SymmetricPositiveDefinite
@@ -17,8 +18,11 @@ class SPDCov2d(nn.Module):
     # 只需要训练V，直接pytorch优化即可
     def __init__(self, in_channel, out_channel, kernel_size, stride=1, padding=0):
         super(SPDCov2d, self).__init__()
-        self.V = nn.Parameter(torch.randn((out_channel, in_channel, kernel_size, kernel_size),
-                                          dtype=torch.float32), requires_grad=True)
+        # self.V = nn.Parameter(torch.randn((out_channel, in_channel, kernel_size, kernel_size),
+        #                                   dtype=torch.float32), requires_grad=True)
+        W = th.zeros((out_channel, in_channel, kernel_size, kernel_size), dtype=th.float32) +\
+            th.eye(kernel_size, dtype=th.float32)
+        self.W = geoopt.ManifoldParameter(W, manifold=SymmetricPositiveDefinite())
         self.stride = stride
         self.padding = padding
         self.in_channel = in_channel
@@ -26,10 +30,10 @@ class SPDCov2d(nn.Module):
         self.kernel_size = kernel_size
 
     def forward(self, x):
-        V = self.V
-        V_T = torch.einsum('oiuv->oivu', V)
-        W = torch.einsum('oiuv, oivw -> oiuw', V_T, V) + 1e-3 * torch.eye(self.kernel_size, device=V.device)  # 构建SPD
-        x = F.conv2d(x, W, stride=self.stride, padding=self.padding)
+        # V = self.V
+        # V_T = torch.einsum('oiuv->oivu', V)
+        # W = torch.einsum('oiuv, oivw -> oiuw', V_T, V) + 1e-10 * torch.eye(self.kernel_size, device=V.device)  # 构建SPD
+        x = F.conv2d(x, self.W, stride=self.stride, padding=self.padding)
         return x
 
 
@@ -113,7 +117,8 @@ class LogEig(nn.Module):
     """
 
     def forward(self, P):
-        return functional.LogEig.apply(P)
+        device = P.device
+        return functional.LogEig.apply(P.to('cpu')).to(device)
 
 
 class SqmEig(nn.Module):
@@ -133,7 +138,8 @@ class ReEig(nn.Module):
     """
 
     def forward(self, P):
-        return functional.ReEig.apply(P)
+        device = P.device
+        return functional.ReEig.apply(P.to('cpu')).to(device)
 
 
 class BaryGeom(nn.Module):

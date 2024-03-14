@@ -272,9 +272,6 @@ class Processor():
         self.best_acc = 0
         self.best_acc_epoch = 0
 
-        # if self.arg.spd == 1:
-        #     self.model.stage2 = self.model.stage2.cuda(self.output_device)
-        # else:
         self.model = self.model.cuda(self.output_device)
 
         self.multi_gpu = False
@@ -469,11 +466,12 @@ class Processor():
 
             if (self.global_step + 1) % 200 == 0:
                 for name, pram in log['pram'].items():
-                    if not isinstance(pram, nn.Parameter):
+                    if name[: 2] != 'a_':
                         pram = np.array([pram], dtype=np.float32)
+                        self.train_writer.add_scalar(name, pram.mean().item(), self.global_step)
                     else:
                         pram = np.array(pram.cpu().data, dtype=np.float32)
-                    self.train_writer.add_scalar(name, pram.mean().item(), self.global_step)
+                        self.train_writer.add_scalar(name[2:], pram.mean().item(), self.global_step)
 
                 self.plot_and_log_tensorboard(log)
 
@@ -506,6 +504,13 @@ class Processor():
         for name, image in log['image'].items():
             image = image.cpu()
             fig, axs = plt.subplots(3, 3, figsize=(12, 9))
+
+            imageShapeLen = len(image.shape)
+
+            if imageShapeLen == 4:
+                image = image[0]
+            elif imageShapeLen == 2:
+                image = image.unsqueeze(0)
 
             for i in range(min(9, len(image))):
                 row = i // 3

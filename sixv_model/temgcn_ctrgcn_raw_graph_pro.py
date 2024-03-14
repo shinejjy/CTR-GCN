@@ -118,7 +118,7 @@ class MultiScale_TemporalConv(nn.Module):
             nn.BatchNorm2d(branch_channels),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=(3, 1), stride=(stride, 1), padding=(1, 0)),
-            nn.BatchNorm2d(branch_channels)  # 为什么还要加bn
+            nn.BatchNorm2d(branch_channels)
         ))
 
         self.branches.append(nn.Sequential(
@@ -169,7 +169,7 @@ class Temporal_GCN_block(nn.Module):
 
 
 class Temporal_GCN(nn.Module):
-    def __init__(self, in_channel, t, rel_channel=4, n_head=4):
+    def __init__(self, in_channel, t, rel_channel=4, n_head=4, residual=False):
         super(Temporal_GCN, self).__init__()
         self.n_head = n_head
         self.temporal_gcn_blocks = nn.ModuleList([Temporal_GCN_block(in_channel, rel_channel) for _ in range(n_head)])
@@ -179,11 +179,65 @@ class Temporal_GCN(nn.Module):
         self.alpha = nn.Parameter(torch.zeros(1, dtype=torch.float32))
         self.A = nn.Parameter(self.temporal_real_adj(t, step=2))
 
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                conv_init(m)
-            elif isinstance(m, nn.BatchNorm2d):
-                bn_init(m, 1)
+        if not residual:
+            self.residual = lambda x: 0
+        else:
+            self.residual = lambda x: x
+
+        # initialize
+        self.apply(weights_init)
+
+    @classmethod
+    def temporal_real_adj(cls, t, step=2):
+        adj = torch.zeros((t, t), dtype=torch.float)
+        for i in range(t):
+            adj[i, max(0, i - step):min(t, i + step + 1)] = 1
+
+        # 行归一化
+        row_sum = adj.sum(dim=1, keepdim=True)
+        adj_normalized = adj / row_sum
+
+        return adj_normalized
+
+    def forward(self, x):
+        # x.shape (b, c, t, v)
+        multi_At = [tem_gcn(x) for tem_gcn in self.temporal_gcn_blocks]  # At.shape (t, t)
+        res = self.residual(x)
+
+        out = None
+        temporal_A = None
+        for i in range(self.n_head):
+            temporal_A = self.alpha * multi_At[i] + self.A
+            z = torch.einsum('btg,bctv->bcgv', temporal_A, x)
+            z = self.fcs[i](z)
+            out = out + z if out is not None else z
+
+        out = self.bn(out)
+        out = self.relu(out)
+        out = out + res
+
+        return out
+
+
+class Temporal_GCN_light(nn.Module):
+    def __init__(self, in_channel, out_channel, t, rel_channel=4, n_head=4, residual=False):
+        assert out_channel % n_head == 0
+        super(Temporal_GCN_light, self).__init__()
+        self.n_head = n_head
+        self.temporal_gcn_blocks = nn.ModuleList([Temporal_GCN_block(in_channel, rel_channel) for _ in range(n_head)])
+        self.fcs = nn.ModuleList([nn.Conv2d(in_channel, out_channel // n_head, kernel_size=1) for _ in range(n_head)])
+        self.bn = nn.BatchNorm2d(in_channel)
+        self.relu = nn.ReLU(inplace=True)
+        self.alpha = nn.Parameter(torch.zeros(1, dtype=torch.float32))
+        self.A = nn.Parameter(self.temporal_real_adj(t, step=2))
+
+        if not residual:
+            self.residual = lambda x: 0
+        else:
+            self.residual = lambda x: x
+
+        # initialize
+        self.apply(weights_init)
 
     @classmethod
     def temporal_real_adj(self, t, step=2):
@@ -199,22 +253,23 @@ class Temporal_GCN(nn.Module):
 
     def forward(self, x):
         # x.shape (b, c, t, v)
-        multi_At = [tem_gcn(x) for tem_gcn in self.temporal_gcn_blocks]  # At.shape (t, t)
-        y = None
 
+        multi_At = [tem_gcn(x) for tem_gcn in self.temporal_gcn_blocks]  # At.shape (t, t)
+        res = self.residual(x)
+
+        head_outs = []
         temporal_A = None
         for i in range(self.n_head):
             temporal_A = self.alpha * multi_At[i] + self.A
             z = torch.einsum('btg,bctv->bcgv', temporal_A, x)
             z = self.fcs[i](z)
-            y = y + z if y is not None else z
+            out = out + z if out is not None else z
 
-        y = self.bn(y)
-        y += x
-        y = self.relu(y)
+        out = self.bn(out)
+        out = self.relu(out)
+        out += res
 
-        return y, temporal_A
-
+        return out
 
 class CTRGC_1(nn.Module):
     def __init__(self, in_channels, out_channels, rel_reduction=8, mid_reduction=1):
@@ -384,14 +439,20 @@ class unit_gcn(nn.Module):
 
 
 class TCN_GCN_unit(nn.Module):
-    def __init__(self, in_channels, out_channels, A3, A6, stride=1, residual=True, kernel_size=5,
+    def __init__(self, in_channels, out_channels, A3, A6, t, stride=1, residual=True, kernel_size=5,
                  dilations=[1, 2]):
         super(TCN_GCN_unit, self).__init__()
         # (4, 3, 64, 25) , out=64
         self.gcn1 = unit_gcn(in_channels, out_channels, A3, A6)
-        self.tcn1 = MultiScale_TemporalConv(out_channels, out_channels, kernel_size=kernel_size, stride=stride,
-                                            dilations=dilations,
-                                            residual=False)
+        if stride == 1:
+            self.tcn1 = Temporal_GCN(out_channels, t, rel_channel=4, n_head=4, residual=False)
+        else:
+            self.tcn1 = nn.Sequential(
+                MultiScale_TemporalConv(out_channels, out_channels, kernel_size=kernel_size, stride=stride,
+                                        dilations=dilations, residual=False),
+                Temporal_GCN(out_channels, t, rel_channel=4, n_head=4, residual=False)
+            )
+
         self.relu = nn.ReLU(inplace=True)
         if not residual:
             self.residual = lambda x: 0
@@ -405,7 +466,8 @@ class TCN_GCN_unit(nn.Module):
     def forward(self, x):
         # (4, 3, 64, 25)
         y, A3, A6, A_fn, alpha, beta = self.gcn1(x)
-        y = self.relu(self.tcn1(y) + self.residual(x))
+        temf = self.tcn1(y)
+        y = self.relu(temf + self.residual(x))
         return y, A3, A6, A_fn, alpha, beta
 
 
@@ -518,21 +580,18 @@ class Stage2(nn.Module):
         base_channel = 60
         base_frame = 64
         # (4, 3, 64, 25)
-        self.l1 = TCN_GCN_unit(in_channels, base_channel, A3, A6, residual=False)
-        self.l2 = TCN_GCN_unit(base_channel, base_channel, A3, A6)
-        self.l3 = TCN_GCN_unit(base_channel, base_channel, A3, A6)
-        self.l4 = TCN_GCN_unit(base_channel, base_channel, A3, A6)
-        self.tem_gcn_bottom = Temporal_GCN(base_channel, t=base_frame, rel_channel=4, n_head=4)
+        self.l1 = TCN_GCN_unit(in_channels, base_channel, A3, A6, t=base_frame, residual=False)
+        self.l2 = TCN_GCN_unit(base_channel, base_channel, A3, A6, t=base_frame)
+        self.l3 = TCN_GCN_unit(base_channel, base_channel, A3, A6, t=base_frame)
+        self.l4 = TCN_GCN_unit(base_channel, base_channel, A3, A6, t=base_frame)
 
-        self.l5 = TCN_GCN_unit(base_channel, base_channel * 2, A3, A6, stride=2)
-        self.l6 = TCN_GCN_unit(base_channel * 2, base_channel * 2, A3, A6)
-        self.l7 = TCN_GCN_unit(base_channel * 2, base_channel * 2, A3, A6)
-        self.tem_gcn_middle = Temporal_GCN(base_channel * 2, t=base_frame//2, rel_channel=4, n_head=4)
+        self.l5 = TCN_GCN_unit(base_channel, base_channel * 2, A3, A6, stride=2, t=base_frame // 2)
+        self.l6 = TCN_GCN_unit(base_channel * 2, base_channel * 2, A3, A6, t=base_frame // 2)
+        self.l7 = TCN_GCN_unit(base_channel * 2, base_channel * 2, A3, A6, t=base_frame // 2)
 
-        self.l8 = TCN_GCN_unit(base_channel * 2, base_channel * 4, A3, A6, stride=2)
-        self.l9 = TCN_GCN_unit(base_channel * 4, base_channel * 4, A3, A6)
-        self.l10 = TCN_GCN_unit(base_channel * 4, base_channel * 4, A3, A6)
-        self.tem_gcn_top = Temporal_GCN(base_channel * 4, t=base_frame//4, rel_channel=4, n_head=4)
+        self.l8 = TCN_GCN_unit(base_channel * 2, base_channel * 4, A3, A6, stride=2, t=base_frame // 4)
+        self.l9 = TCN_GCN_unit(base_channel * 4, base_channel * 4, A3, A6, t=base_frame // 4)
+        self.l10 = TCN_GCN_unit(base_channel * 4, base_channel * 4, A3, A6, t=base_frame // 4)
 
         self.fc = nn.Linear(base_channel * 4, num_class)
         nn.init.normal_(self.fc.weight, 0, math.sqrt(2. / num_class))
@@ -541,20 +600,6 @@ class Stage2(nn.Module):
             self.drop_out = nn.Dropout(drop_out)
         else:
             self.drop_out = lambda x: x
-
-        # Retrospect Model
-        self.first_tram = nn.Sequential(
-            nn.AvgPool2d((4, 1)),
-            nn.Conv2d(60, 240, 1),
-            nn.BatchNorm2d(240),
-            nn.ReLU()
-        )
-        self.second_tram = nn.Sequential(
-            nn.AvgPool2d((2, 1)),
-            nn.Conv2d(120, 240, 1),
-            nn.BatchNorm2d(240),
-            nn.ReLU()
-        )
 
     def forward(self, x):
 
@@ -583,19 +628,12 @@ class Stage2(nn.Module):
         x = self.l2(x)[0]  # (N*M, 60, 64, 25)
         x = self.l3(x)[0]  # (N*M, 60, 64, 25)
         x = self.l4(x)[0]  # (N*M, 60, 64, 25)
-        x2 = x
         x = self.l5(x)[0]  # (N*M, 120, 32, 25)
         x = self.l6(x)[0]  # (N*M, 120, 32, 25)
         x = self.l7(x)[0]  # (N*M, 120, 32, 25)
-        x3 = x
         x = self.l8(x)[0]  # (N*M, 240, 16, 25)
         x = self.l9(x)[0]  # (N*M, 240, 16, 25)
         x, A3, A6, A_fn, alpha, beta = self.l10(x)  # (N*M, 240, 16, 25)
-
-        x, temporal_A = self.tem_gcn_top(x)
-        x2 = self.first_tram(self.tem_gcn_bottom(x2)[0])
-        x3 = self.second_tram(self.tem_gcn_middle(x3)[0])
-        x = x + x2 + x3
 
         # N*M,C,T,V
         c_new = x.size(1)
@@ -607,13 +645,12 @@ class Stage2(nn.Module):
             'A3': A3,
             'A6': A6,
             'A_fn': A_fn,
-            'temporal_A': temporal_A.detach()
         }
 
         log['pram'] = {
             'a_spatial_alpha': alpha,
             'a_beta': beta,
-            'a_temporal_alpha': self.tem_gcn_top.alpha.detach()
+            'a_temporal_alpha': self.l10.tcn1.alpha.detach()
         }
 
         return self.fc(x), log

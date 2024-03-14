@@ -51,10 +51,20 @@ def weights_init(m):
             m.bias.data.fill_(0)
 
 
+class Chomp(nn.Module):
+    def __init__(self, chomp_size):
+        super(Chomp, self).__init__()
+        self.chomp_size = chomp_size
+
+    def forward(self, x):
+        # B, C, T, V
+        return x[:, :, :-self.chomp_size, :].contiguous()
+
+
 class TemporalConv(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, dilation=1):
         super(TemporalConv, self).__init__()
-        pad = (kernel_size + (kernel_size - 1) * (dilation - 1) - 1) // 2
+        pad = ((kernel_size - 1) * dilation) // stride
         self.conv = nn.Conv2d(
             in_channels,
             out_channels,
@@ -63,10 +73,13 @@ class TemporalConv(nn.Module):
             stride=(stride, 1),
             dilation=(dilation, 1))
 
+        self.chomp = Chomp(pad) if stride == 1 else lambda x: x
+
         self.bn = nn.BatchNorm2d(out_channels)
 
     def forward(self, x):
         x = self.conv(x)
+        x = self.chomp(x)
         x = self.bn(x)
         return x
 
@@ -180,7 +193,8 @@ class CTRGC_1(nn.Module):
         # (4, 8, 25) (4, 8, 25) (4, 64, 64, 25)
         x1 = self.tanh(x1.unsqueeze(-1) - x2.unsqueeze(-2))
         # (4, 64, 25, 25)
-        x1 = self.conv4(x1) * alpha + (A3.unsqueeze(0).unsqueeze(0) if A3 is not None else 0) + A6_ex.unsqueeze(0) * beta  # N,C,V,V
+        x1 = self.conv4(x1) * alpha + (A3.unsqueeze(0).unsqueeze(0) if A3 is not None else 0) + A6_ex.unsqueeze(
+            0) * beta  # N,C,V,V
         # (4, 64, 25, 25) (1, 1, 25, 25)
         return x1
 
@@ -193,9 +207,8 @@ class CTRGC_2(nn.Module):
         self.conv3 = nn.Conv2d(self.in_channels, self.out_channels, kernel_size=1)
 
     def forward(self, x, x1):
-        x3 = self.conv3(x)  # (batch_size, num_channel, t, v)
-        b, c, t, v = x3.shape
-        assert c % 6 == 0
+        # (4, 3, 64, 25)
+        x3 = self.conv3(x)
         x1 = torch.einsum('ncuv,nctv->nctu', x1, x3)
         # (4, 64, 64, 25)
         return x1
@@ -226,6 +239,7 @@ class unit_spd(nn.Module):
         x = self.spd_net(x)
 
         return x
+
 
 class unit_tcn(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=9, stride=1):
@@ -274,8 +288,10 @@ class unit_gcn(nn.Module):
 
         self.A3 = nn.Parameter(torch.from_numpy(A3.astype(np.float32)))
         self.A6 = nn.Parameter(torch.from_numpy(A6.astype(np.float32)))
+        # self.A_SE = Variable(torch.from_numpy(A.astype(np.float32)), requires_grad=False)
         self.alpha = nn.Parameter(torch.zeros(1))
         self.beta = nn.Parameter(torch.zeros(1))
+        # self.gamma = nn.Parameter(torch.zeros(1))
         self.bn = nn.BatchNorm2d(out_channels)
         self.soft = nn.Softmax(-2)
         self.relu = nn.ReLU(inplace=True)
@@ -286,6 +302,7 @@ class unit_gcn(nn.Module):
             elif isinstance(m, nn.BatchNorm2d):
                 bn_init(m, 1)
         bn_init(self.bn, 1e-6)
+
 
     def forward(self, x):
         # (4, 3, 64, 25)
@@ -309,7 +326,8 @@ class unit_gcn(nn.Module):
         y += self.down(x)
         y = self.relu(y)
 
-        return y, A3.detach(), A6.detach(), A_at[:, 0, 0, :, :].squeeze(1).squeeze(1).detach(), self.alpha.detach(), self.beta.detach()
+        return y, A3.detach(), A6.detach(), A_at[:, 0, 0, :, :].squeeze(1).squeeze(
+            1).detach(), self.alpha.detach(), self.beta.detach()
 
 
 class TCN_GCN_unit(nn.Module):
@@ -532,8 +550,8 @@ class Stage2(nn.Module):
         }
 
         log['pram'] = {
-            'alpha': alpha,
-            'beta': beta,
+            'a_alpha': alpha,
+            'a_beta': beta,
         }
 
         return self.fc(x), log

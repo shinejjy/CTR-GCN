@@ -149,9 +149,9 @@ class MultiScale_TemporalConv(nn.Module):
         return out
 
 
-class CTRGC_1(nn.Module):
+class CTRGC(nn.Module):
     def __init__(self, in_channels, out_channels, rel_reduction=8, mid_reduction=1):
-        super(CTRGC_1, self).__init__()
+        super(CTRGC, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         if in_channels == 3 or in_channels == 9:
@@ -162,6 +162,7 @@ class CTRGC_1(nn.Module):
             self.mid_channels = in_channels // mid_reduction
         self.conv1 = nn.Conv2d(self.in_channels, self.rel_channels, kernel_size=1)
         self.conv2 = nn.Conv2d(self.in_channels, self.rel_channels, kernel_size=1)
+        self.conv3 = nn.Conv2d(self.in_channels, self.out_channels, kernel_size=1)
         self.conv4 = nn.Conv2d(self.rel_channels, self.out_channels, kernel_size=1)
         self.tanh = nn.Tanh()
         for m in self.modules():
@@ -170,47 +171,18 @@ class CTRGC_1(nn.Module):
             elif isinstance(m, nn.BatchNorm2d):
                 bn_init(m, 1)
 
-    def forward(self, x, A3=None, A6=None, alpha=1, beta=1):
-
-        A6_ex = A6.view(1, 6, 25, 25).expand(self.out_channels // 6, -1, -1, -1)
-        A6_ex = A6_ex.contiguous().view(self.out_channels, 25, 25)
-
+    def forward(self, x, A=None, alpha=1):
         # (4, 3, 64, 25)
-        x1, x2 = self.conv1(x).mean(-2), self.conv2(x).mean(-2)
+        x1, x2, x3 = self.conv1(x).mean(-2), self.conv2(x).mean(-2), self.conv3(x)
         # (4, 8, 25) (4, 8, 25) (4, 64, 64, 25)
         x1 = self.tanh(x1.unsqueeze(-1) - x2.unsqueeze(-2))
         # (4, 64, 25, 25)
-        x1 = self.conv4(x1) * alpha + (A3.unsqueeze(0).unsqueeze(0) if A3 is not None else 0) + A6_ex.unsqueeze(
-            0) * beta  # N,C,V,V
+        x1 = self.conv4(x1) * alpha + (A.unsqueeze(0).unsqueeze(0) if A is not None else 0)  # N,C,V,V
         # (4, 64, 25, 25) (1, 1, 25, 25)
-        return x1
-
-
-class CTRGC_2(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(CTRGC_2, self).__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.conv3 = nn.Conv2d(self.in_channels, self.out_channels, kernel_size=1)
-
-    def forward(self, x, x1):
-        # (4, 3, 64, 25)
-        x3 = self.conv3(x)
         x1 = torch.einsum('ncuv,nctv->nctu', x1, x3)
         # (4, 64, 64, 25)
         return x1
 
-
-# class CTRGC(nn.Module):
-#     def __init__(self, in_channels, out_channels, rel_reduction=8, mid_reduction=1):
-#         super(CTRGC, self).__init__()
-#         self.ctrgc1 = CTRGC_1(in_channels, out_channels, rel_reduction, mid_reduction)
-#         self.ctrgc2 = CTRGC_2()
-#
-#     def forward(self, x):
-#         x1 = self.ctrgc1(x)
-#         x1 = self.ctrgc2(x, x1)
-#         return x1
 
 class unit_spd(nn.Module):
     def __init__(self):
@@ -246,7 +218,7 @@ class unit_tcn(nn.Module):
 
 
 class unit_gcn(nn.Module):
-    def __init__(self, in_channels, out_channels, A3, A6, coff_embedding=4, residual=True):
+    def __init__(self, in_channels, out_channels, A3, coff_embedding=4, residual=True):
         super(unit_gcn, self).__init__()
         # (4, 3, 64, 25)
         inter_channels = out_channels // coff_embedding
@@ -254,13 +226,9 @@ class unit_gcn(nn.Module):
         self.out_c = out_channels
         self.in_c = in_channels
         self.num_subset = A3.shape[0]
-        self.convs1 = nn.ModuleList()
+        self.convs = nn.ModuleList()
         for i in range(self.num_subset):
-            self.convs1.append(CTRGC_1(in_channels, out_channels))
-
-        self.convs2 = nn.ModuleList()
-        for i in range(self.num_subset):
-            self.convs2.append(CTRGC_2(in_channels, out_channels))
+            self.convs.append(CTRGC(in_channels, out_channels))
 
         if residual:
             if in_channels != out_channels:
@@ -274,11 +242,7 @@ class unit_gcn(nn.Module):
             self.down = lambda x: 0
 
         self.A3 = nn.Parameter(torch.from_numpy(A3.astype(np.float32)))
-        self.A6 = nn.Parameter(torch.from_numpy(A6.astype(np.float32)))
-        # self.A_SE = Variable(torch.from_numpy(A.astype(np.float32)), requires_grad=False)
         self.alpha = nn.Parameter(torch.zeros(1))
-        self.beta = nn.Parameter(torch.zeros(1))
-        # self.gamma = nn.Parameter(torch.zeros(1))
         self.bn = nn.BatchNorm2d(out_channels)
         self.soft = nn.Softmax(-2)
         self.relu = nn.ReLU(inplace=True)
@@ -290,37 +254,80 @@ class unit_gcn(nn.Module):
                 bn_init(m, 1)
         bn_init(self.bn, 1e-6)
 
-        # self.attention = MultiHeadSelfAttention(36, 36, 36, 6)
-        # self.layer1 = nn.Linear(625, 36)
-        # self.relu2 = nn.ReLU(inplace=True)
-        # self.layer2 = nn.Linear(36, 625)
-        # self.relu3 = nn.ReLU(inplace=True)
-        # self.conv = nn.Conv2d(1, out_channels, kernel_size=1)
-
     def forward(self, x):
         # (4, 3, 64, 25)
         y = None
         A3 = self.A3.cuda(x.get_device())
-        A6 = self.A6.cuda(x.get_device())
-        # A_se = self.A_SE.cuda(x.get_device())
-
-        A_at = []
-        # 直接相加？
-        for i in range(self.num_subset):
-            A_at.append(self.convs1[i](x, A3[i], A6, self.alpha, self.beta))
-
-        A_at = torch.stack(A_at, 0)
 
         for i in range(self.num_subset):
-            z = self.convs2[i](x, A_at[i])
+            z = self.convs[i](x, A3[i], self.alpha)
             y = z + y if y is not None else z
-
         y = self.bn(y)
         y += self.down(x)
         y = self.relu(y)
 
-        return y, A3.detach(), A6.detach(), A_at[:, 0, 0, :, :].squeeze(1).squeeze(
-            1).detach(), self.alpha.detach(), self.beta.detach()
+        return y
+
+
+class simple_gcn(nn.Module):
+    def __init__(self):
+        super(simple_gcn, self).__init__()
+
+    def forward(self, x, A):
+        out = torch.einsum('uv,nctv->nctu', A, x)
+        return out
+
+
+class split_gcn(nn.Module):
+    def __init__(self, in_channels, out_channels, A6):
+        super(split_gcn, self).__init__()
+        self.A6 = nn.Parameter(torch.from_numpy(A6.astype(np.float32)))
+        num_split = self.A6.shape[0]
+        assert out_channels % num_split == 0
+        branch_channels = out_channels // num_split
+        self.branches1 = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(in_channels, branch_channels, kernel_size=1),
+                nn.BatchNorm2d(branch_channels),
+                nn.ReLU(inplace=True),
+            )
+            for _ in range(num_split)
+        ])
+        self.branches2 = nn.ModuleList([
+            simple_gcn() for _ in range(num_split)
+        ])
+
+        self.branches3 = nn.ModuleList([
+            nn.BatchNorm2d(branch_channels) for _ in range(num_split)
+        ])
+
+        self.residual = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=1),
+            nn.BatchNorm2d(out_channels)
+        )
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                conv_init(m)
+            elif isinstance(m, nn.BatchNorm2d):
+                bn_init(m, 1)
+
+    def forward(self, x):
+        # input dim: (N, C, T, V)
+        A6 = self.A6.cuda(x.get_device())
+        res = self.residual(x)
+        branch_outs = []
+        for conv in self.branches1:
+            out = conv(x)
+            branch_outs.append(out)
+        for i, gcn in enumerate(self.branches2):
+            branch_outs[i] = gcn(branch_outs[i], A6[i])
+        for i, bn in enumerate(self.branches3):
+            branch_outs[i] = bn(branch_outs[i])
+
+        out = torch.cat(branch_outs, dim=1)
+        out = out + res
+        return out
 
 
 class TCN_GCN_unit(nn.Module):
@@ -328,7 +335,8 @@ class TCN_GCN_unit(nn.Module):
                  dilations=[1, 2]):
         super(TCN_GCN_unit, self).__init__()
         # (4, 3, 64, 25) , out=64
-        self.gcn1 = unit_gcn(in_channels, out_channels, A3, A6)
+        self.gcn1 = unit_gcn(in_channels, out_channels, A3)
+        self.gcn2 = split_gcn(in_channels, out_channels, A6)
         self.tcn1 = MultiScale_TemporalConv(out_channels, out_channels, kernel_size=kernel_size, stride=stride,
                                             dilations=dilations,
                                             residual=False)
@@ -344,50 +352,9 @@ class TCN_GCN_unit(nn.Module):
 
     def forward(self, x):
         # (4, 3, 64, 25)
-        y, A3, A6, A_fn, alpha, beta = self.gcn1(x)
-        y = self.relu(self.tcn1(y) + self.residual(x))
-        return y, A3, A6, A_fn, alpha, beta
-
-
-class MultiHeadSelfAttention(nn.Module):
-    dim_in: int  # input dimension
-    dim_k: int  # key and query dimension
-    dim_v: int  # value dimension
-    num_heads: int  # number of heads, for each head, dim_* = dim_* // num_heads
-
-    def __init__(self, dim_in, dim_k, dim_v, num_heads=8):
-        super(MultiHeadSelfAttention, self).__init__()
-        # 维度必须能被num_head 整除
-        assert dim_k % num_heads == 0 and dim_v % num_heads == 0, "dim_k and dim_v must be multiple of num_heads"
-        self.dim_in = dim_in
-        self.dim_k = dim_k
-        self.dim_v = dim_v
-        self.num_heads = num_heads
-        # 定义线性变换矩阵
-        self.linear_q = nn.Linear(dim_in, dim_k, bias=False)
-        self.linear_k = nn.Linear(dim_in, dim_k, bias=False)
-        self.linear_v = nn.Linear(dim_in, dim_v, bias=False)
-        self._norm_fact = 1 / math.sqrt(dim_k // num_heads)
-
-    def forward(self, x):
-        # x: tensor of shape (batch, n, dim_in)
-        batch, n, dim_in = x.shape
-        assert dim_in == self.dim_in
-
-        nh = self.num_heads
-        dk = self.dim_k // nh  # dim_k of each head
-        dv = self.dim_v // nh  # dim_v of each head
-
-        q = self.linear_q(x).reshape(batch, n, nh, dk).transpose(1, 2)  # (batch, nh, n, dk)
-        k = self.linear_k(x).reshape(batch, n, nh, dk).transpose(1, 2)  # (batch, nh, n, dk)
-        v = self.linear_v(x).reshape(batch, n, nh, dv).transpose(1, 2)  # (batch, nh, n, dv)
-
-        dist = torch.matmul(q, k.transpose(2, 3)) * self._norm_fact  # batch, nh, n, n
-        dist = torch.softmax(dist, dim=-1)  # batch, nh, n, n
-
-        att = torch.matmul(dist, v)  # batch, nh, n, dv
-        att = att.transpose(1, 2).reshape(batch, n, self.dim_v)  # batch, n, dim_v
-        return att
+        spatial_out = self.gcn1(x) + self.gcn2(x)
+        y = self.relu(self.tcn1(spatial_out) + self.residual(x))
+        return y
 
 
 class Model(nn.Module):
@@ -476,19 +443,19 @@ class Stage2(nn.Module):
         else:
             self.drop_out = lambda x: x
 
-        # Retrospect Model
-        self.first_tram = nn.Sequential(
-            nn.AvgPool2d((4, 1)),
-            nn.Conv2d(60, 240, 1),
-            nn.BatchNorm2d(240),
-            nn.ReLU()
-        )
-        self.second_tram = nn.Sequential(
-            nn.AvgPool2d((2, 1)),
-            nn.Conv2d(120, 240, 1),
-            nn.BatchNorm2d(240),
-            nn.ReLU()
-        )
+        # # Retrospect Model
+        # self.first_tram = nn.Sequential(
+        #     nn.AvgPool2d((4, 1)),
+        #     nn.Conv2d(60, 240, 1),
+        #     nn.BatchNorm2d(240),
+        #     nn.ReLU()
+        # )
+        # self.second_tram = nn.Sequential(
+        #     nn.AvgPool2d((2, 1)),
+        #     nn.Conv2d(120, 240, 1),
+        #     nn.BatchNorm2d(240),
+        #     nn.ReLU()
+        # )
 
     def forward(self, x):
 
@@ -513,22 +480,20 @@ class Stage2(nn.Module):
         x = x.view(N, M, V, C, T).permute(0, 1, 3, 4, 2).contiguous().view(N * M, C, T, V)
         # N MVC T -> N M V C T -> N M C T V -> NM C T V
 
-        x = self.l1(x)[0]  # (N*M, 60 , 64, 25)
-        x = self.l2(x)[0]  # (N*M, 60, 64, 25)
-        x = self.l3(x)[0]  # (N*M, 60, 64, 25)
-        x = self.l4(x)[0]  # (N*M, 60, 64, 25)
-        x2 = x
-        x = self.l5(x)[0]  # (N*M, 120, 32, 25)
-        x = self.l6(x)[0]  # (N*M, 120, 32, 25)
-        x = self.l7(x)[0]  # (N*M, 120, 32, 25)
-        x3 = x
-        x = self.l8(x)[0]  # (N*M, 240, 16, 25)
-        x = self.l9(x)[0]  # (N*M, 240, 16, 25)
-        x, A3, A6, A_fn, alpha, beta = self.l10(x)  # (N*M, 240, 16, 25)
+        x = self.l1(x)  # (N*M, 60 , 64, 25)
+        x = self.l2(x)  # (N*M, 60, 64, 25)
+        x = self.l3(x)  # (N*M, 60, 64, 25)
+        x = self.l4(x)  # (N*M, 60, 64, 25)
+        x = self.l5(x)  # (N*M, 120, 32, 25)
+        x = self.l6(x)  # (N*M, 120, 32, 25)
+        x = self.l7(x)  # (N*M, 120, 32, 25)
+        x = self.l8(x)  # (N*M, 240, 16, 25)
+        x = self.l9(x)  # (N*M, 240, 16, 25)
+        x = self.l10(x)  # (N*M, 240, 16, 25)
 
-        x2 = self.first_tram(x2)
-        x3 = self.second_tram(x3)
-        x = x + x2 + x3
+        # x2 = self.first_tram(x2)
+        # x3 = self.second_tram(x3)
+        # x = x + x2 + x3
 
         # N*M,C,T,V
         c_new = x.size(1)
@@ -537,14 +502,12 @@ class Stage2(nn.Module):
         x = self.drop_out(x)
 
         log['image'] = {
-            'A3': A3,
-            'A6': A6,
-            'A_fn': A_fn,
+            'A3': self.l10.gcn1.A3.detach(),
+            'A6': self.l10.gcn2.A6.detach(),
         }
 
         log['pram'] = {
-            'a_alpha': alpha,
-            'a_beta': beta,
+            'a_alpha': self.l10.gcn1.alpha.detach(),
         }
 
         return self.fc(x), log

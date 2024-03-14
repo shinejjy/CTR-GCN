@@ -556,8 +556,8 @@ class Stage2(nn.Module):
         }
 
         log['pram'] = {
-            'alpha': alpha,
-            'beta': beta,
+            'a_alpha': alpha,
+            'a_beta': beta,
         }
 
         return self.fc(x), log

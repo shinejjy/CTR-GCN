@@ -164,24 +164,31 @@ class CTRGC_1(nn.Module):
         self.conv2 = nn.Conv2d(self.in_channels, self.rel_channels, kernel_size=1)
         self.conv4 = nn.Conv2d(self.rel_channels, self.out_channels, kernel_size=1)
         self.tanh = nn.Tanh()
+
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 conv_init(m)
             elif isinstance(m, nn.BatchNorm2d):
                 bn_init(m, 1)
 
-    def forward(self, x, A3=None, A6=None, alpha=1, beta=1):
+    def forward(self, x, A3, A6, A_eps=None, alpha=1, beta=1):
 
+        tune_channel = (self.out_channels // 6) * 6
+        eps_channel = self.out_channels - tune_channel
         A6_ex = A6.view(1, 6, 25, 25).expand(self.out_channels // 6, -1, -1, -1)
-        A6_ex = A6_ex.contiguous().view(self.out_channels, 25, 25)
+        A6_ex = A6_ex.contiguous().view(tune_channel, 25, 25)
+        if eps_channel != 0:
+            A_eps_ex = A_eps.expand(eps_channel, 25, 25)
+            A_tune = torch.cat([A6_ex, A_eps_ex], dim=0)
+        else:
+            A_tune = A6_ex
 
         # (4, 3, 64, 25)
         x1, x2 = self.conv1(x).mean(-2), self.conv2(x).mean(-2)
         # (4, 8, 25) (4, 8, 25) (4, 64, 64, 25)
         x1 = self.tanh(x1.unsqueeze(-1) - x2.unsqueeze(-2))
         # (4, 64, 25, 25)
-        x1 = self.conv4(x1) * alpha + (A3.unsqueeze(0).unsqueeze(0) if A3 is not None else 0) + A6_ex.unsqueeze(
-            0) * beta  # N,C,V,V
+        x1 = self.conv4(x1) * alpha + A3.unsqueeze(0).unsqueeze(0) + A_tune.unsqueeze(0) * beta  # N,C,V,V
         # (4, 64, 25, 25) (1, 1, 25, 25)
         return x1
 
@@ -275,6 +282,11 @@ class unit_gcn(nn.Module):
 
         self.A3 = nn.Parameter(torch.from_numpy(A3.astype(np.float32)))
         self.A6 = nn.Parameter(torch.from_numpy(A6.astype(np.float32)))
+        if out_channels % 6 == 0:
+            self.A_eps = None
+        else:
+            self.A_eps = nn.Parameter(torch.zeros(1, 25, 25))
+
         # self.A_SE = Variable(torch.from_numpy(A.astype(np.float32)), requires_grad=False)
         self.alpha = nn.Parameter(torch.zeros(1))
         self.beta = nn.Parameter(torch.zeros(1))
@@ -302,12 +314,12 @@ class unit_gcn(nn.Module):
         y = None
         A3 = self.A3.cuda(x.get_device())
         A6 = self.A6.cuda(x.get_device())
-        # A_se = self.A_SE.cuda(x.get_device())
+        A_eps = self.A_eps.cuda(x.get_device())
 
         A_at = []
         # 直接相加？
         for i in range(self.num_subset):
-            A_at.append(self.convs1[i](x, A3[i], A6, self.alpha, self.beta))
+            A_at.append(self.convs1[i](x, A3[i], A6, A_eps, self.alpha, self.beta))
 
         A_at = torch.stack(A_at, 0)
 
@@ -320,7 +332,7 @@ class unit_gcn(nn.Module):
         y = self.relu(y)
 
         return y, A3.detach(), A6.detach(), A_at[:, 0, 0, :, :].squeeze(1).squeeze(
-            1).detach(), self.alpha.detach(), self.beta.detach()
+            1).detach(), A_eps.detach(), self.alpha.detach(), self.beta.detach()
 
 
 class TCN_GCN_unit(nn.Module):
@@ -344,9 +356,9 @@ class TCN_GCN_unit(nn.Module):
 
     def forward(self, x):
         # (4, 3, 64, 25)
-        y, A3, A6, A_fn, alpha, beta = self.gcn1(x)
+        y, A3, A6, A_fn, A_eps, alpha, beta = self.gcn1(x)
         y = self.relu(self.tcn1(y) + self.residual(x))
-        return y, A3, A6, A_fn, alpha, beta
+        return y, A3, A6, A_fn, A_eps, alpha, beta
 
 
 class MultiHeadSelfAttention(nn.Module):
@@ -455,7 +467,7 @@ class Stage2(nn.Module):
         self.num_point = num_point
         self.data_bn = nn.BatchNorm1d(num_person * in_channels * num_point)
 
-        base_channel = 60
+        base_channel = 64
         # (4, 3, 64, 25)
         self.l1 = TCN_GCN_unit(in_channels, base_channel, A3, A6, residual=False)
         self.l2 = TCN_GCN_unit(base_channel, base_channel, A3, A6)
@@ -479,14 +491,14 @@ class Stage2(nn.Module):
         # Retrospect Model
         self.first_tram = nn.Sequential(
             nn.AvgPool2d((4, 1)),
-            nn.Conv2d(60, 240, 1),
-            nn.BatchNorm2d(240),
+            nn.Conv2d(base_channel, base_channel * 4, 1),
+            nn.BatchNorm2d(base_channel * 4),
             nn.ReLU()
         )
         self.second_tram = nn.Sequential(
             nn.AvgPool2d((2, 1)),
-            nn.Conv2d(120, 240, 1),
-            nn.BatchNorm2d(240),
+            nn.Conv2d(base_channel * 2, base_channel * 4, 1),
+            nn.BatchNorm2d(base_channel * 4),
             nn.ReLU()
         )
 
@@ -524,7 +536,7 @@ class Stage2(nn.Module):
         x3 = x
         x = self.l8(x)[0]  # (N*M, 240, 16, 25)
         x = self.l9(x)[0]  # (N*M, 240, 16, 25)
-        x, A3, A6, A_fn, alpha, beta = self.l10(x)  # (N*M, 240, 16, 25)
+        x, A3, A6, A_fn, A_eps, alpha, beta = self.l10(x)  # (N*M, 240, 16, 25)
 
         x2 = self.first_tram(x2)
         x3 = self.second_tram(x3)
@@ -540,6 +552,7 @@ class Stage2(nn.Module):
             'A3': A3,
             'A6': A6,
             'A_fn': A_fn,
+            'A_eps': A_eps,
         }
 
         log['pram'] = {

@@ -566,19 +566,12 @@ class Stage2(nn.Module):
         x = self.l2(x)[0]  # (N*M, 60, 64, 25)
         x = self.l3(x)[0]  # (N*M, 60, 64, 25)
         x = self.l4(x)[0]  # (N*M, 60, 64, 25)
-        x2 = x
         x = self.l5(x)[0]  # (N*M, 120, 32, 25)
         x = self.l6(x)[0]  # (N*M, 120, 32, 25)
         x = self.l7(x)[0]  # (N*M, 120, 32, 25)
-        x3 = x
         x = self.l8(x)[0]  # (N*M, 240, 16, 25)
         x = self.l9(x)[0]  # (N*M, 240, 16, 25)
         x, A3, A6, A_fn, alpha, beta = self.l10(x)  # (N*M, 240, 16, 25)
-
-        x = self.tem_gcn_top(x)
-        x2 = self.first_tram(self.tem_gcn_bottom(x2))
-        x3 = self.second_tram(self.tem_gcn_middle(x3))
-        x = x + x2 + x3
 
         # N*M,C,T,V
         c_new = x.size(1)
