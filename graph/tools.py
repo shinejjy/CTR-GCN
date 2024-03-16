@@ -24,6 +24,13 @@ def get_k_body_parts_ntu(k):
 
         partition_body = [left_arm, right_arm, left_hand, right_hand, head, body, left_leg, right_leg]
         partition_body = [[index - 1 for index in part] for part in partition_body]
+    elif k == 6.5:
+        left_arm = [10, 11, 12, 24, 25]
+        right_arm = [6, 7, 8, 22, 23]
+        head = [3, 4]
+        body = [1, 2, 5, 9, 21]
+        left_leg = [17, 18, 19, 20]
+        right_leg = [13, 14, 15, 16]
 
     return partition_body
 

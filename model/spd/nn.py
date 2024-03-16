@@ -22,6 +22,8 @@ class SPDCov2d(nn.Module):
         #                                   dtype=torch.float32), requires_grad=True)
         W = th.zeros((out_channel, in_channel, kernel_size, kernel_size), dtype=th.float32) +\
             th.eye(kernel_size, dtype=th.float32)
+        for i in range(kernel_size):
+            W[:, :, i, i] += (i + 1) * 1e-6
         self.W = geoopt.ManifoldParameter(W, manifold=SymmetricPositiveDefinite())
         self.stride = stride
         self.padding = padding

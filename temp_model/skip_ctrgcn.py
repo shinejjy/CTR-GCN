@@ -226,10 +226,10 @@ class unit_gcn(nn.Module):
                 self.down = lambda x: x
         else:
             self.down = lambda x: 0
-        # if self.adaptive:
-        #     self.PA = nn.Parameter(torch.from_numpy(A.astype(np.float32)))
-        # else:
-        #     self.A = Variable(torch.from_numpy(A.astype(np.float32)), requires_grad=False)
+        if self.adaptive:
+            self.PA = nn.Parameter(torch.from_numpy(A.astype(np.float32)))
+        else:
+            self.A = Variable(torch.from_numpy(A.astype(np.float32)), requires_grad=False)
         self.alpha = nn.Parameter(torch.zeros(1))
         self.bn = nn.BatchNorm2d(out_channels)
         self.soft = nn.Softmax(-2)
@@ -296,7 +296,7 @@ class Model(nn.Module):
             self.graph = Graph(**graph_args)
 
         A = self.graph.A3  # 3,25,25
-        A6 = self.graph.A6
+        A6 = self.graph.A6_ones
 
         self.num_class = num_class
         self.num_point = num_point
@@ -361,16 +361,19 @@ class Model(nn.Module):
         x = self.l4(x)
         x = self.l5(x)
 
-        g2 = self.sst_gcn_bottom(g1, x)
+        g2, (As_at2, At_at2, As_act2, At_act2) = self.sst_gcn_bottom(g1, x)
 
         x = self.l6(g2)
         x = self.l7(x)
         x = self.l8(x)
 
-        g3 = self.sst_gcn_mid(g2, x)
+        g3, (As_at3, At_at3, As_act3, At_act3) = self.sst_gcn_mid(g2, x)
 
         x = self.l9(g3)
         x = self.l10(x)
+
+        # g4, (_) = self.sst_gcn_top(g3)
+        # x = g4 + x
 
         # N*M,C,T,V
         c_new = x.size(1)
@@ -379,7 +382,16 @@ class Model(nn.Module):
         x = self.drop_out(x)
 
         logs = {}
-        logs['image'] = {}
+        logs['image'] = {
+            'As_at2': As_at2,
+            'At_at2': At_at2,
+            'As_act2': As_act2,
+            'At_act2': At_act2,
+            'As_at3': As_at3,
+            'At_at3': At_at3,
+            'As_act3': As_act3,
+            'At_act3': At_act3
+        }
         logs['pram'] = {}
 
         return self.fc(x), logs
@@ -405,6 +417,12 @@ class SST_GCN_block(nn.Module):
 
         self.sigmoid = nn.Sigmoid()
 
+        self.tanh_s = nn.Tanh()
+        self.tanh_t = nn.Tanh()
+
+        self.relu_s = nn.ReLU()
+        self.relu_t = nn.ReLU()
+
         self.bn = nn.BatchNorm2d(out_channels)
 
         for m in self.modules():
@@ -422,7 +440,8 @@ class SST_GCN_block(nn.Module):
         spatial_feature2 = spatial_feature2.permute(0, 1, 2, 3).reshape(b, -1, v)
 
         As = torch.matmul(spatial_feature1, spatial_feature2)
-        As = F.softmax(As, dim=1)  # (b, v, v)
+        As = self.relu_s(self.tanh_s(As))
+        # As = F.softmax(As, dim=2)  # (b, v, v)
 
         return As
 
@@ -435,34 +454,46 @@ class SST_GCN_block(nn.Module):
         temporal_feature2 = temporal_feature2.permute(0, 1, 3, 2).reshape(b, -1, t)
 
         At = torch.matmul(temporal_feature1, temporal_feature2)
-        At = F.softmax(At, dim=2)  # (b, t, t)
+        At = self.relu_t(self.tanh_t(At))
+        # At = F.softmax(At, dim=1)  # (b, t, t)
 
         return At
 
     def forward(self, g1, h2, As_r, At_r):
-        As = self.get_As(g1) + As_r * self.act_s
-        At = self.get_At(g1) + At_r * self.act_t
+        As_at = self.get_As(g1)
+        At_at = self.get_At(g1)
+        As_act = As_r * self.act_s
+        At_act = At_r * self.act_t
+        As = As_at + As_act
+        At = At_at + At_act
         nu1 = torch.einsum('buv,bctv->bctu', As, g1)
         nu1 = torch.einsum('bctu,bty->bcyu', nu1, At)
         nu1 = self.stride_pro(nu1)
+        if h2 is None:
+            h2 = self.stride_pro(g1)
         h_star2 = torch.cat([nu1, h2], dim=1)
         g2 = self.W1(h_star2) * self.sigmoid(self.W2(h_star2))
         g2 = self.bn(g2)
 
-        return g2
+        return g2, (As_at.detach(), At_at.detach(), As_act.detach(), At_act.detach())
 
 
 class SST_GCN(nn.Module):
-    def __init__(self, in_channels, out_channels, num_point, len_temp, As, rel_reduction=8):
+    def __init__(self, in_channels, out_channels, num_point, len_temp, As, rel_reduction=8, adaptive=False):
         super(SST_GCN, self).__init__()
+
+        self.adaptive = adaptive
 
         self.sst_gcn_blocks = nn.ModuleList([
             SST_GCN_block(in_channels, out_channels, num_point, len_temp, rel_reduction=rel_reduction)
             for _ in range(6)
         ])
-
-        self.As = Variable(torch.from_numpy(As), requires_grad=False)
-        self.At = Variable(torch.from_numpy(self.temporal_real_adj(len_temp, 6)), requires_grad=False)
+        if not adaptive:
+            self.As = Variable(torch.from_numpy(As), requires_grad=False)
+            self.At = Variable(torch.from_numpy(self.temporal_real_adj(len_temp, 6)), requires_grad=True)
+        else:
+            self.As = nn.Parameter(torch.from_numpy(As), requires_grad=False)
+            self.At = nn.Parameter(torch.from_numpy(self.temporal_real_adj(len_temp, 6)), requires_grad=True)
 
         self.bn = nn.BatchNorm2d(out_channels)
 
@@ -474,22 +505,32 @@ class SST_GCN(nn.Module):
             elif isinstance(m, nn.BatchNorm2d):
                 bn_init(m, 1)
 
-    def forward(self, g1, h2):
-        As = self.As.cuda(g1.get_device())
-        At = self.At.cuda(g1.get_device())
+    def forward(self, g1, h2=None):
+        if not self.adaptive:
+            As = self.As.cuda(g1.get_device())
+            At = self.At.cuda(g1.get_device())
+        else:
+            As = self.As
+            At = self.At
 
         # g2 = None
         # for i in range(6):
         #     z = self.sst_gcn_blocks[i](g1, h2, As[i], At[i])
         #     g2 = g2 + z if g2 is not None else z
 
-        g2 = torch.stack([self.sst_gcn_blocks[i](g1, h2, As[i], At[i]) for i in range(6)], dim=1)
-        g2, _ = torch.max(g2, dim=1, keepdim=False)
+        z1, A1 = self.sst_gcn_blocks[0](g1, h2, As[0], At[0])
+        z2, A2 = self.sst_gcn_blocks[1](g1, h2, As[1], At[1])
+        z3, A3 = self.sst_gcn_blocks[2](g1, h2, As[2], At[2])
+        z4, A4 = self.sst_gcn_blocks[3](g1, h2, As[3], At[3])
+        z5, A5 = self.sst_gcn_blocks[4](g1, h2, As[4], At[4])
+        z6, A6 = self.sst_gcn_blocks[5](g1, h2, As[5], At[5])
+
+        g2 = z1 + z2 + z3 + z4 + z5 + z6
 
         g2 = self.bn(g2)
         g2 = self.relu(g2)
 
-        return g2
+        return g2, A1
 
     @staticmethod
     def temporal_real_adj(len_temp, num_head):
