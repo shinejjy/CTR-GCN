@@ -289,13 +289,6 @@ class unit_gcn(nn.Module):
                 bn_init(m, 1)
         bn_init(self.bn, 1e-6)
 
-        # self.attention = MultiHeadSelfAttention(36, 36, 36, 6)
-        # self.layer1 = nn.Linear(625, 36)
-        # self.relu2 = nn.ReLU(inplace=True)
-        # self.layer2 = nn.Linear(36, 625)
-        # self.relu3 = nn.ReLU(inplace=True)
-        # self.conv = nn.Conv2d(1, out_channels, kernel_size=1)
-
     def forward(self, x, spd_A=None):
         # (4, 3, 64, 25)
         y = None
@@ -309,22 +302,6 @@ class unit_gcn(nn.Module):
             A_at.append(self.convs1[i](x, A3[i], A6, spd_A, self.alpha, self.beta, self.gamma))
 
         A_at = torch.stack(A_at, 0)
-        # VI, N, C, V, V = A_at.shape
-        # A_at2 = A_at.permute(1, 0, 2, 3, 4).mean(-3).view(VI * N, V * V)
-        # # x2 = self.conv1(x1.view(VI * N, C, V, V)).view(VI * N, V * V)
-        # A_at2 = self.relu2(self.layer1(A_at2)).view(N, VI, 36)
-        #
-        # A_at2 = A_at2 + self.attention(A_at2)
-        # # A_at2 = A_at2 + self.layer_norm2(self.attention2(A_at2))
-        #
-        # A_at2 = self.layer2(A_at2.view(VI * N, 36)).view(N * VI, V, V)
-        # A_at2 = self.relu3(A_at2)
-        # # x2 = x2.unsqueeze(-3).repeat(1, 1, C, 1, 1)
-        # A_at2 = self.conv(A_at2.unsqueeze(-3)).view(N, VI, C, V, V)
-        # A_at2 = A_at2.permute(1, 0, 2, 3, 4)  # VI, N, C, V, V
-        # A_at = A_at + A_at2
-        #
-        # beta = 0.01
 
         for i in range(self.num_subset):
             z = self.convs2[i](x, A_at[i])

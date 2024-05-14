@@ -1,3 +1,5 @@
+import os.path
+
 import numpy as np
 
 from torch.utils.data import Dataset
@@ -41,6 +43,7 @@ class Feeder(Dataset):
         self.bone = bone
         self.vel = vel
         self.load_data()
+        # self.load_per_data()
         if normalization:
             self.get_mean_map()
 
@@ -60,6 +63,15 @@ class Feeder(Dataset):
         N, T, _ = self.data.shape
         self.data = self.data.reshape((N, T, 2, 25, 3)).transpose(0, 4, 1, 3, 2)
 
+    def load_per_data(self):
+        if self.split == 'train':
+            self.data_dir = os.path.join(self.data_path, 'train')
+        elif self.split == 'test':
+            self.data_dir = os.path.join(self.data_path, 'test')
+        else:
+            raise NotImplementedError('data split only supports train/test')
+        self.length = len(os.listdir(self.data_dir))
+
     def get_mean_map(self):
         data = self.data
         N, C, T, V, M = data.shape
@@ -68,13 +80,21 @@ class Feeder(Dataset):
 
     def __len__(self):
         return len(self.label)
+        # return self.length
 
     def __iter__(self):
         return self
 
     def __getitem__(self, index):
+        # data = np.load(os.path.join(self.data_dir, f'{self.split}_{index}.npz'))
+        # data_numpy = data['x']
+        # T, _ = data_numpy.shape
+        # data_numpy = data_numpy.reshape((T, 2, 25, 3)).transpose(3, 0, 2, 1)
+        # label = data['y']
+
         data_numpy = self.data[index]
         label = self.label[index]
+
         data_numpy = np.array(data_numpy)
         valid_frame_num = np.sum(data_numpy.sum(0).sum(-1).sum(-1) != 0)
         # reshape Tx(MVC) to CTVM
@@ -105,3 +125,7 @@ def import_class(name):
     for comp in components[1:]:
         mod = getattr(mod, comp)
     return mod
+
+
+if __name__ == '__main__':
+    feeder = Feeder(data_path='..\\data\\ntu\\NTU60_CS.npz')

@@ -17,6 +17,8 @@ neighbor = inward + outward
 
 edge = inward + outward + self_link
 
+partition_label = [3, 3, 3, 2, 0, 0, 0, 0, 1, 1, 1, 1, 4, 4, 4, 4, 5, 5, 5, 5]
+
 
 class MyGraph:
     def __init__(self, labeling_mode='spatial'):
@@ -27,6 +29,7 @@ class MyGraph:
         self.hop_dis = tools.get_hop_distance(
             self.num_node, self.edge, max_hop=1)
         self.A6 = self.get_adjacency_matrix_A_k(6, tools.get_k_body_parts_ucla(6), labeling_mode)
+        self.A = self.get_adjacency_matrix_A_partly(labeling_mode)
         self.A8 = self.get_adjacency_matrix_A_k(8, tools.get_k_body_parts_ucla(8), labeling_mode)
         self.A3 = self.get_adjacency_matrix_A3(labeling_mode)
         self.spd_A = copy.deepcopy(self.A6)
@@ -61,6 +64,40 @@ class MyGraph:
         else:
             raise ValueError()
         return A3
+
+
+    def get_adjacency_matrix_A_partly(self, labeling_mode=None):
+        if labeling_mode is None:
+            return self.A6
+        if labeling_mode == 'spatial':
+            A = np.zeros((20, 20), dtype=np.int32)
+
+            h = {}
+            cnt = 6
+            for i in range(self.num_node):
+                for j in range(self.num_node):
+                    indices_i, indices_j = partition_label[i], partition_label[j]
+                    if self.hop_dis[j, i] <= 1:
+                        if indices_i == indices_j:
+                            A[i, j] = A[j, i] = indices_j
+                        else:
+                            A[i, j] = indices_i
+                            A[j, i] = indices_j
+                    else:
+                        if not h.get(f'{indices_i}-{indices_j}'):
+                            h[f'{indices_i}-{indices_j}'] = cnt
+                            cnt = cnt + 1
+                        A[i, j] = h[f'{indices_i}-{indices_j}']
+
+                        if not h.get(f'{indices_j}-{indices_i}'):
+                            h[f'{indices_j}-{indices_i}'] = cnt
+                            cnt = cnt + 1
+                        A[j, i] = h[f'{indices_j}-{indices_i}']
+
+        else:
+            raise ValueError()
+        return A
+
 
 
 class Graph:

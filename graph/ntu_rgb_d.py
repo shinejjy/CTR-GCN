@@ -2,6 +2,7 @@ import copy
 import sys
 import numpy as np
 
+
 sys.path.extend(['../'])
 from graph import tools
 
@@ -16,6 +17,8 @@ outward = [(j, i) for (i, j) in inward]
 neighbor = inward + outward
 
 edge = inward + outward + self_link
+
+partition_label = [3, 3, 2, 2, 3, 1, 1, 1, 3, 0, 0, 0, 5, 5, 5, 5, 4, 4, 4, 4, 3, 1, 1, 0, 0]
 
 
 class Graph:
@@ -47,9 +50,10 @@ class MyGraph:
         self.hop_dis = tools.get_hop_distance(
             self.num_node, self.edge, max_hop=1)
         self.A6 = self.get_adjacency_matrix_A_k(6, tools.get_k_body_parts_ntu(6), labeling_mode)
-        self.A6_ones = self.get_adjacency_matrix_A_partly(6, tools.get_k_body_parts_ntu(6), labeling_mode)
+        self.A = self.get_adjacency_matrix_A_partly(labeling_mode)
         self.A8 = self.get_adjacency_matrix_A_k(8, tools.get_k_body_parts_ntu(8), labeling_mode)
         self.A3 = self.get_adjacency_matrix_A3(labeling_mode)
+        self.partition_label = partition_label
         self.spd_A = copy.deepcopy(self.A6)
 
     def get_adjacency_matrix_A_k(self, k, partition_body, labeling_mode=None, ones=False):
@@ -82,26 +86,38 @@ class MyGraph:
             raise ValueError()
         return Ak
 
-    def get_adjacency_matrix_A_partly(self, k, partition_body, labeling_mode=None):
+    def get_adjacency_matrix_A_partly(self, labeling_mode=None):
         if labeling_mode is None:
             return self.A6
         if labeling_mode == 'spatial':
-            if k == 6:
-                Ak = np.zeros((6, 25, 25), dtype=np.float32)
-            elif k == 8:
-                Ak = np.zeros((8, 25, 25), dtype=np.float32)
-            else:
-                raise ValueError()
+            A = np.zeros((25, 25), dtype=np.int32)
 
-            for idx, partition in enumerate(partition_body):
-                for i in partition:
-                    for j in partition:
-                        if self.hop_dis[i, j] == 1 or self.hop_dis[i, j] == 0:
-                            Ak[idx, i, j] = Ak[idx, j, i] = 1.0
+            h = {}
+            cnt = 6
+            for i in range(self.num_node):
+                for j in range(self.num_node):
+                    indices_i, indices_j = partition_label[i], partition_label[j]
+                    if self.hop_dis[j, i] <= 1:
+                        if indices_i == indices_j:
+                            A[i, j] = A[j, i] = indices_j
+                        else:
+                            A[i, j] = indices_i
+                            A[j, i] = indices_j
+                    else:
+                        if not h.get(f'{indices_i}-{indices_j}'):
+                            h[f'{indices_i}-{indices_j}'] = cnt
+                            cnt = cnt + 1
+                        A[i, j] = h[f'{indices_i}-{indices_j}']
+
+                        if not h.get(f'{indices_j}-{indices_i}'):
+                            h[f'{indices_j}-{indices_i}'] = cnt
+                            cnt = cnt + 1
+                        A[j, i] = h[f'{indices_j}-{indices_i}']
+
 
         else:
             raise ValueError()
-        return Ak
+        return A
 
 
     def get_adjacency_matrix_A3(self, labeling_mode=None):
@@ -115,10 +131,23 @@ class MyGraph:
 
 
 if __name__ == '__main__':
+    from matplotlib import pyplot as plt
     graph = MyGraph()
-    for A in graph.A6:
-        for i in range(25):
-            for j in range(25):
-                print(A[i][j], end=' ')
-            print()
-        print()
+    A = graph.A + 1
+
+
+    plt.figure(figsize=(10, 10))
+    # 绘制矩阵 A，使用 jet 颜色映射
+    img = plt.imshow(A, cmap='jet', interpolation='nearest')
+    # 在每个像素上方显示相应的数值
+    for i in range(A.shape[0]):
+        for j in range(A.shape[1]):
+            # 检查像素的颜色深浅，决定显示的文字颜色
+            if np.mean(img.cmap(img.norm(A[i, j]))) > 0.6:
+                plt.text(j, i, str(A[i, j]), ha='center', va='center', color='black')
+            else:
+                plt.text(j, i, str(A[i, j]), ha='center', va='center', color='white')
+    # 设置标题
+    plt.title('Matrix A')
+    # 显示图像
+    plt.show()

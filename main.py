@@ -27,13 +27,15 @@ import torch.optim as optim
 import yaml
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
-from model.spd.optimizers import MixOptimizer
+from utils.functional import MixOptimizer
 
 from torchlight import DictAction
 
 import matplotlib as mpl
+
 mpl.use('Agg')
 print(plt.get_backend())
+
 
 # import resource
 # rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -503,7 +505,7 @@ class Processor():
     def plot_and_log_tensorboard(self, log):
         for name, image in log['image'].items():
             image = image.cpu()
-            fig, axs = plt.subplots(3, 3, figsize=(12, 9))
+            fig, axs = plt.subplots(4, 4, figsize=(16, 12))
 
             imageShapeLen = len(image.shape)
 
@@ -512,17 +514,18 @@ class Processor():
             elif imageShapeLen == 2:
                 image = image.unsqueeze(0)
 
-            for i in range(min(9, len(image))):
-                row = i // 3
-                col = i % 3
-                axs[row, col].imshow(image[i], cmap='jet', interpolation='nearest')
+            for i in range(min(16, len(image))):
+                row = i // 4
+                col = i % 4
+                img = axs[row, col].imshow(image[i], cmap='jet', interpolation='nearest')
                 axs[row, col].set_title(f'{name} Channel {i}')
                 axs[row, col].axis('off')
+                fig.colorbar(img, ax=axs[row, col])
 
             # 删除未使用的子图
-            for i in range(len(image), 9):
-                row = i // 3
-                col = i % 3
+            for i in range(len(image), 16):
+                row = i // 4
+                col = i % 4
                 fig.delaxes(axs[row, col])
 
             plt.tight_layout()
